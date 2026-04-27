@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meeting Minutes UI</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <h1>Meeting Minutes UI</h1>
+          <p id="recording-state">状態: 待機中</p>
+        </div>
+        <div class="controls">
+          <select id="device-select"></select>
+          <select id="transcriber-select">
+            <option value="local">Local</option>
+            <option value="api">OpenAI API</option>
+            <option value="none">No Transcript</option>
+          </select>
+          <button id="start-button" class="primary">録音開始</button>
+          <button id="stop-button" class="danger">停止</button>
+          <button id="save-button">TeX保存</button>
+          <button id="compile-button">TeX再コンパイル</button>
+          <label class="toggle">
+            <input id="auto-reflect-toggle" type="checkbox" checked />
+            <span>自動反映</span>
+          </label>
+        </div>
+      </header>
+
+      <section class="status-panel">
+        <div class="status-item">
+          <span>入力レベル</span>
+          <div class="meter"><div id="meter-bar"></div></div>
+        </div>
+        <div class="status-item"><span>経過</span><strong id="elapsed">00:00:00</strong></div>
+        <div class="status-item"><span>録音先</span><strong id="recording-path">-</strong></div>
+        <div class="status-item"><span>文字起こし</span><strong id="transcript-path">-</strong></div>
+        <div class="status-item warning" id="warning-text">警告なし</div>
+      </section>
+
+      <main class="workspace">
+        <section class="pane tex-pane">
+          <div class="pane-header">
+            <h2>議事録 TeX</h2>
+            <span id="document-path"></span>
+          </div>
+          <textarea id="tex-editor" spellcheck="false"></textarea>
+        </section>
+
+        <section class="pane transcript-pane">
+          <div class="pane-header">
+            <h2>ライブ文字起こし</h2>
+            <span id="transcript-count">0 segments</span>
+          </div>
+          <div id="transcript-list" class="transcript-list"></div>
+        </section>
+      </main>
+
+      <section class="bottom-panel">
+        <div class="log-panel">
+          <h3>システムログ</h3>
+          <pre id="log-output"></pre>
+        </div>
+        <div class="compile-panel">
+          <h3>コンパイル結果</h3>
+          <pre id="compile-output"></pre>
+        </div>
+      </section>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+  </html>

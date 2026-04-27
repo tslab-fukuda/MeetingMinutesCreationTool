@@ -1,0 +1,6 @@
+numpy
+sounddevice
+openai
+faster-whisper
+fastapi
+uvicorn

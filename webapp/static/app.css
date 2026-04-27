@@ -1,0 +1,242 @@
+:root {
+  --bg: #f3efe7;
+  --card: #fbf8f2;
+  --ink: #1f2a30;
+  --muted: #5f6d72;
+  --line: #d5cdc1;
+  --accent: #0f6d68;
+  --accent-2: #dd5d3b;
+  --warn: #a24a2f;
+  --shadow: 0 18px 40px rgba(45, 54, 61, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Yu Gothic UI", "Hiragino Sans", sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(15, 109, 104, 0.12), transparent 35%),
+    radial-gradient(circle at bottom right, rgba(221, 93, 59, 0.12), transparent 28%),
+    var(--bg);
+  color: var(--ink);
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 12px;
+  padding: 18px;
+}
+
+.topbar,
+.status-panel,
+.pane,
+.bottom-panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 18px;
+  gap: 16px;
+}
+
+.brand h1,
+.pane-header h2,
+.bottom-panel h3 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+.brand p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.controls {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+button,
+select {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 14px;
+  background: white;
+  color: var(--ink);
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+button.danger {
+  background: var(--accent-2);
+  color: #fff;
+  border-color: var(--accent-2);
+}
+
+.toggle {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: white;
+}
+
+.status-panel {
+  display: grid;
+  grid-template-columns: 1.3fr repeat(4, 1fr);
+  gap: 12px;
+  padding: 14px 18px;
+}
+
+.status-item {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.status-item span {
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+
+.status-item strong,
+.status-item.warning {
+  font-size: 0.96rem;
+  overflow-wrap: anywhere;
+}
+
+.status-item.warning {
+  color: var(--warn);
+}
+
+.meter {
+  height: 14px;
+  border-radius: 999px;
+  background: #dfe6e3;
+  overflow: hidden;
+}
+
+#meter-bar {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #f4b942, var(--accent-2));
+  transition: width 0.2s ease;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  gap: 12px;
+  min-height: 54vh;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pane-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.pane-header span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+#tex-editor {
+  flex: 1;
+  width: 100%;
+  resize: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 16px;
+  font: 14px/1.55 Consolas, "Courier New", monospace;
+}
+
+.transcript-list {
+  padding: 16px;
+  overflow: auto;
+  display: grid;
+  gap: 10px;
+}
+
+.transcript-entry {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.transcript-entry header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.bottom-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 14px;
+}
+
+.bottom-panel pre {
+  margin: 8px 0 0;
+  min-height: 140px;
+  max-height: 220px;
+  overflow: auto;
+  background: #f8f5ef;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  white-space: pre-wrap;
+  font: 13px/1.45 Consolas, "Courier New", monospace;
+}
+
+@media (max-width: 1100px) {
+  .status-panel,
+  .workspace,
+  .bottom-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
