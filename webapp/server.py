@@ -135,8 +135,8 @@ def escape_tex(text: str) -> str:
     return "".join(replacements.get(char, char) for char in text)
 
 
-def sanitize_device_name(name: str) -> str:
-    return "".join(char if 32 <= ord(char) < 127 else "?" for char in name)
+def normalize_device_name(name: str) -> str:
+    return "".join(char for char in name if char.isprintable()).strip()
 
 
 def format_hms(seconds: float) -> str:
@@ -861,7 +861,7 @@ def get_devices() -> dict[str, Any]:
         items.append(
             {
                 "id": index,
-                "name": sanitize_device_name(str(device["name"])),
+                "name": normalize_device_name(str(device["name"])),
                 "max_input_channels": device["max_input_channels"],
                 "is_default_input": index == default_input,
                 "is_default_output": index == default_output,

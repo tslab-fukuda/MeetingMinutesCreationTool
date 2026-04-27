@@ -80,8 +80,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def sanitize_name(name: str) -> str:
-    return "".join(ch if 32 <= ord(ch) < 127 else "?" for ch in name)
+def normalize_device_name(name: str) -> str:
+    return "".join(ch for ch in name if ch.isprintable()).strip()
 
 
 def list_devices() -> int:
@@ -95,7 +95,7 @@ def list_devices() -> int:
         if idx == default_output:
             labels.append("default-output")
         label_text = f" [{' '.join(labels)}]" if labels else ""
-        name = sanitize_name(str(device["name"]))
+        name = normalize_device_name(str(device["name"]))
         print(
             f"{idx:>2}: {name}{label_text} | "
             f"in={device['max_input_channels']} out={device['max_output_channels']} "
