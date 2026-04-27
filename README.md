@@ -43,11 +43,34 @@ Windows 上で動かすことを前提にしています。
 - `requirements.txt` のインストール
 - `recordings/` と `transcripts/` の作成
 - `latexmk` / `uplatex` / `dvipdfmx` の存在確認
+- TeX コマンドが見つからない場合は `setup_texlive.bat` を自動実行
+
+`setup_texlive.bat` では次を行います:
+
+- 公式 CTAN ミラーから TeX Live インストーラを取得
+- `C:\texlive\2026` へ TeX Live を無人インストール
+- このプロジェクトで必要な日本語 TeX 関連パッケージを追加
+- `latexmk` / `uplatex` / `dvipdfmx` が使える状態にする
 
 注意:
 
 - `winget` で Python を新規インストールした直後は、環境によっては新しいターミナルで再実行が必要な場合があります。
-- TeX 環境までは自動インストールしていません。未導入の場合はセットアップ時に警告が表示されます。
+- `setup_texlive.bat` は `curl` と `tar` を使います。通常の Windows 10/11 では標準搭載されている想定です。
+- TeX Live のインストーラ取得やパッケージ展開には時間とディスク容量が必要です。
+- `winget` が使えない端末でも、TeX については `setup_texlive.bat` で別途導入できます。
+
+## Git に含めないもの
+
+開発環境構築でローカルに生成・インストールされるものは Git に含めない前提です。
+
+- `.venv/`
+- `recordings/`
+- `transcripts/`
+- `.tmp_texlive/`
+- LaTeX の生成物
+- ローカルの起動ログ
+
+そのため、クローンまたは fork した先で各自が `setup_windows.bat` を実行して環境構築する運用を想定しています。
 
 ## Web アプリの起動
 
@@ -68,6 +91,11 @@ Windows 上で動かすことを前提にしています。
 ```text
 http://127.0.0.1:8000
 ```
+
+補足:
+
+- Web アプリの TeX コンパイルは、`PATH` に TeX Live が未反映でも `C:\texlive\2026\bin\windows` などの標準配置を自動検出します。
+- 初回セットアップは `.\setup_windows.bat` のみで進められるようにしてあります。
 
 ## 画面構成
 
@@ -137,6 +165,7 @@ Python 側の依存は `requirements.txt` にまとまっています。
 そのため、PDF 生成まで使う場合は `uplatex` と `dvipdfmx` を含む日本語 TeX 環境が必要です。
 
 ローカルですでに TeX Live が入っている場合は、そのまま使えることが多いです。
+未導入なら `.\setup_windows.bat` から自動で `setup_texlive.bat` が呼ばれます。TeX だけ個別に入れたい場合は `.\setup_texlive.bat` を単独で実行してください。
 
 ## トラブルシュート
 
@@ -155,8 +184,10 @@ Python 側の依存は `requirements.txt` にまとまっています。
 
 - `latexmk`, `uplatex`, `dvipdfmx` が使えるか確認してください
 - 日本語 TeX 環境が正しく入っているか確認してください
+- 未導入なら `.\setup_windows.bat` を再実行してください
+- 既に導入済みでも古いターミナルでは `PATH` が未反映なことがあるため、新しいターミナルで再起動してください
 
 ## 補足
 
 このリポジトリでは、録音ファイル、文字起こし結果、LaTeX の生成物は `.gitignore` で除外しています。  
-そのため、クローン先では必要に応じて自分で生成して使う形になります。
+そのため、クローン先では必要に応じて自分で生成して使う形になります。開発環境構築に伴う一時ファイルやインストーラ展開物も Git には含めません。

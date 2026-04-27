@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import os
 import queue
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -43,6 +45,7 @@ AUTO_HEADER_LINES = [
     r"\begin{itemize}",
 ]
 AUTO_FOOTER_LINES = [r"\end{itemize}"]
+AUTO_EMPTY_ITEM = r"\item[]"
 
 
 def detect_encoding(path: Path) -> str:
@@ -59,6 +62,61 @@ def detect_encoding(path: Path) -> str:
 def read_text_with_encoding(path: Path) -> tuple[str, str]:
     encoding = detect_encoding(path)
     return path.read_text(encoding=encoding), encoding
+
+
+def candidate_tex_bin_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    env_dir = os.environ.get("TEXLIVE_BIN")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    candidates.extend(
+        [
+            Path(r"C:\texlive\current\bin\windows"),
+            Path(r"C:\texlive\2026\bin\windows"),
+            Path(r"C:\texlive\2025\bin\windows"),
+        ]
+    )
+
+    texlive_root = Path(r"C:\texlive")
+    if texlive_root.exists():
+        for release_dir in sorted(texlive_root.iterdir(), reverse=True):
+            bin_dir = release_dir / "bin" / "windows"
+            candidates.append(bin_dir)
+
+    unique_candidates: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(candidate)
+    return unique_candidates
+
+
+def build_tex_env() -> dict[str, str]:
+    env = os.environ.copy()
+    path_entries = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
+    merged_entries = list(path_entries)
+    known_entries = {entry.lower() for entry in path_entries if entry}
+
+    for candidate in candidate_tex_bin_dirs():
+        if not candidate.exists():
+            continue
+        candidate_str = str(candidate)
+        if candidate_str.lower() not in known_entries:
+            merged_entries.insert(0, candidate_str)
+            known_entries.add(candidate_str.lower())
+
+    env["PATH"] = os.pathsep.join(entry for entry in merged_entries if entry)
+    return env
+
+
+def resolve_latexmk_command() -> tuple[str | None, dict[str, str]]:
+    env = build_tex_env()
+    latexmk_path = shutil.which("latexmk", path=env.get("PATH"))
+    return latexmk_path, env
 
 
 def escape_tex(text: str) -> str:
@@ -176,9 +234,12 @@ def extract_block_header_footer(block: str) -> tuple[list[str], list[str]]:
 
 def rebuild_auto_block(header: list[str], entries: dict[int, str], footer: list[str]) -> str:
     lines = list(header)
-    for index in sorted(entries):
-        lines.append(f"% AUTO-SEGMENT: {index:03d}")
-        lines.extend(entries[index].splitlines() or [""])
+    if entries:
+        for index in sorted(entries):
+            lines.append(f"% AUTO-SEGMENT: {index:03d}")
+            lines.extend(entries[index].splitlines() or [""])
+    else:
+        lines.append(AUTO_EMPTY_ITEM)
     lines.extend(footer)
     return "\n".join(lines)
 
@@ -636,21 +697,43 @@ class MeetingAppState:
         controller.stop()
 
     def compile_document(self) -> dict[str, Any]:
+        latexmk_command, tex_env = resolve_latexmk_command()
+        if not latexmk_command:
+            message = (
+                "latexmk was not found. Run setup_texlive.bat or install TeX Live "
+                "with uplatex and dvipdfmx."
+            )
+            with self.lock:
+                self.compile_log = message
+                self.compile_ok = False
+                self.pdf_path = None
+            self.add_log("latex compile failed")
+            return {
+                "ok": False,
+                "log": message,
+                "pdf_path": None,
+            }
+
         result = subprocess.run(
-            ["latexmk", str(self.document_path)],
+            [latexmk_command, str(self.document_path)],
             cwd=ROOT_DIR,
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=tex_env,
         )
         compile_log = (result.stdout + "\n" + result.stderr).strip()
-        pdf_path = ROOT_DIR / f"{self.document_path.stem}.pdf"
+        pdf_candidates = [
+            ROOT_DIR / f"{self.document_path.stem}.pdf",
+            self.document_path.with_suffix(".pdf"),
+        ]
+        pdf_path = next((path for path in pdf_candidates if path.exists()), None)
         with self.lock:
             self.compile_log = compile_log
             self.compile_ok = result.returncode == 0
             self.pdf_path = (
-                str(pdf_path.relative_to(ROOT_DIR)) if pdf_path.exists() else None
+                str(pdf_path.relative_to(ROOT_DIR)) if pdf_path is not None else None
             )
         self.add_log("latex compiled" if result.returncode == 0 else "latex compile failed")
         return {

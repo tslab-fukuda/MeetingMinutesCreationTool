@@ -8,6 +8,11 @@ __pycache__/
 .venv/
 venv/
 
+# Local setup artifacts
+.tmp_texlive/
+uvicorn_stdout.log
+uvicorn_stderr.log
+
 # Editors
 .vscode/
 
