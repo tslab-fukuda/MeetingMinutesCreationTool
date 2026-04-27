@@ -72,6 +72,29 @@ Windows 上で動かすことを前提にしています。
 
 そのため、クローンまたは fork した先で各自が `setup_windows.bat` を実行して環境構築する運用を想定しています。
 
+## 変更を Pull Request にする
+
+変更をコミットして Pull Request を作る一連の作業は、次のバッチで実行できます。
+
+```powershell
+.\publish_pr.bat "コミットメッセージ" "Pull Request タイトル"
+```
+
+このバッチで行うこと:
+
+- `origin` の最新状態を取得
+- `main` 上で実行した場合は作業ブランチを自動作成
+- ローカル変更を `git add -A` してコミット
+- `origin/main` を現在の作業ブランチへマージ
+- 作業ブランチを `origin` に push
+- GitHub CLI または Git の保存済み GitHub 認証情報を使って Pull Request を作成
+
+注意:
+
+- 事前に GitHub へ push できる認証状態にしておいてください。
+- マージ競合が起きた場合は、競合を解消してコミットしてから再実行してください。
+- 生成物は `.gitignore` に従って除外されるため、必要なソース変更だけがコミット対象になります。
+
 ## Web アプリの起動
 
 セットアップ後は次で起動できます。
@@ -126,6 +149,8 @@ http://127.0.0.1:8000
   - OpenAI Audio API を使う単体文字起こしツール
 - `tools/monitor_meeting.py`
   - 録音と文字起こしの同時監視ツール
+- `publish_pr.bat`
+  - 変更のコミット、push、Pull Request 作成をまとめて行う補助バッチ
 - `Texテンプレート2026/tmplate.tex`
   - 編集対象の議事録テンプレート
 
