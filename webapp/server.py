@@ -139,6 +139,58 @@ def normalize_device_name(name: str) -> str:
     return "".join(char for char in name if char.isprintable()).strip()
 
 
+def device_dedupe_key(name: str) -> str:
+    normalized = normalize_device_name(name).casefold()
+    normalized = re.sub(r"^\d+[-\s]*", "", normalized)
+    normalized = re.sub(r"^(?:microphone|マイク)\s*\((?:\d+-\s*)?", "", normalized)
+    normalized = re.sub(r"^(?:line input|ライン入力)\s*\((?:\d+-\s*)?", "", normalized)
+    normalized = re.sub(r"^(?:stereo mixer|ステレオ ミキサー)\s*\((?:\d+-\s*)?", "", normalized)
+    normalized = re.sub(r"\)$", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
+def is_virtual_default_device(name: str) -> bool:
+    normalized = normalize_device_name(name).casefold()
+    return normalized in {
+        "microsoft sound mapper - input",
+        "プライマリ サウンド キャプチャ ドライバー",
+    }
+
+
+def device_priority(index: int, device: Any, default_input: int) -> tuple[int, int, int]:
+    if index == default_input:
+        return (0, 0, index)
+    hostapi = int(device.get("hostapi", 99))
+    hostapi_priority = {
+        2: 1,  # Windows WASAPI
+        0: 2,  # MME
+        1: 3,  # Windows DirectSound
+        3: 4,  # Windows WDM-KS
+    }.get(hostapi, 9)
+    return (1, hostapi_priority, index)
+
+
+def dedupe_input_devices(devices: Any, default_input: int) -> list[tuple[int, Any]]:
+    selected: dict[str, tuple[int, Any]] = {}
+    for index, device in enumerate(devices):
+        if int(device["max_input_channels"]) <= 0:
+            continue
+        if is_virtual_default_device(str(device["name"])):
+            continue
+        key = device_dedupe_key(str(device["name"]))
+        if not key:
+            key = str(index)
+        current = selected.get(key)
+        if current is None or device_priority(index, device, default_input) < device_priority(
+            current[0],
+            current[1],
+            default_input,
+        ):
+            selected[key] = (index, device)
+    return sorted(selected.values(), key=lambda item: item[0])
+
+
 def format_hms(seconds: float) -> str:
     total = max(0, int(seconds))
     hours, remainder = divmod(total, 3600)
@@ -857,7 +909,7 @@ def get_devices() -> dict[str, Any]:
     devices = sd.query_devices()
     default_input, default_output = sd.default.device
     items = []
-    for index, device in enumerate(devices):
+    for index, device in dedupe_input_devices(devices, default_input):
         items.append(
             {
                 "id": index,
