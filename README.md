@@ -72,6 +72,24 @@ Windows 上で動かすことを前提にしています。
 
 そのため、クローンまたは fork した先で各自が `setup_windows.bat` を実行して環境構築する運用を想定しています。
 
+## ブランチへ変更を積む
+
+開発中の変更は `main` へ直接 push せず、作業ブランチへ積みます。
+
+```powershell
+.\push_branch.bat "コミットメッセージ"
+```
+
+このバッチで行うこと:
+
+- `origin` の最新状態を取得
+- `main` 上で実行した場合は作業ブランチを自動作成
+- ローカル変更を `git add -A` してコミット
+- `origin/main` を現在の作業ブランチへマージ
+- 現在の作業ブランチだけを `origin` に push
+
+ある程度機能がまとまったら、次の Pull Request 用バッチで `main` への反映準備をします。`main` へ直接 push する運用ではなく、Pull Request を作ってレビュー後に merge する想定です。
+
 ## 変更を Pull Request にする
 
 変更をコミットして Pull Request を作る一連の作業は、次のバッチで実行できます。
@@ -94,6 +112,7 @@ Windows 上で動かすことを前提にしています。
 - 事前に GitHub へ push できる認証状態にしておいてください。
 - マージ競合が起きた場合は、競合を解消してコミットしてから再実行してください。
 - 生成物は `.gitignore` に従って除外されるため、必要なソース変更だけがコミット対象になります。
+- 日々の小さな変更は `push_branch.bat` で作業ブランチへ push し、まとまった段階で `publish_pr.bat` を使ってください。
 
 ## Web アプリの起動
 
@@ -149,6 +168,8 @@ http://127.0.0.1:8000
   - OpenAI Audio API を使う単体文字起こしツール
 - `tools/monitor_meeting.py`
   - 録音と文字起こしの同時監視ツール
+- `push_branch.bat`
+  - 開発中の変更を作業ブランチへコミットして push する補助バッチ
 - `publish_pr.bat`
   - 変更のコミット、push、Pull Request 作成をまとめて行う補助バッチ
 - `Texテンプレート2026/tmplate.tex`
