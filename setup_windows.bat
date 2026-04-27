@@ -63,6 +63,11 @@ if errorlevel 1 (
 if not exist "recordings" mkdir recordings
 if not exist "transcripts" mkdir transcripts
 
+if not exist "local_settings.env" if exist "local_settings.env.example" (
+  echo [INFO] Creating local_settings.env from example...
+  copy "local_settings.env.example" "local_settings.env" >NUL
+)
+
 echo.
 echo [INFO] Checking external commands...
 call :check_command latexmk "TeX compile"

@@ -168,6 +168,8 @@ http://127.0.0.1:8000
   - OpenAI Audio API を使う単体文字起こしツール
 - `tools/monitor_meeting.py`
   - 録音と文字起こしの同時監視ツール
+- `local_settings.env.example`
+  - OpenAI / ローカル LLM のローカル設定テンプレート
 - `push_branch.bat`
   - 開発中の変更を作業ブランチへコミットして push する補助バッチ
 - `publish_pr.bat`
@@ -181,9 +183,16 @@ http://127.0.0.1:8000
 
 ## OpenAI API キー
 
-OpenAI Audio API を使う場合は `OPENAI_API_KEY` が必要です。
+OpenAI Audio API や OpenAI の LLM を使う場合は `OPENAI_API_KEY` が必要です。
 
-PowerShell 例:
+設定場所は、リポジトリ直下の `local_settings.env` です。`setup_windows.bat` 実行時に `local_settings.env.example` から自動作成されます。
+
+```text
+OPENAI_API_KEY=your_api_key_here
+OPENAI_LLM_MODEL=gpt-4o-mini
+```
+
+一時的に PowerShell で設定する場合:
 
 ```powershell
 $env:OPENAI_API_KEY="your_api_key_here"
@@ -193,6 +202,43 @@ $env:OPENAI_API_KEY="your_api_key_here"
 
 - API の利用料金は ChatGPT の通常契約とは別です。
 - API のクォータ不足時は、ローカル文字起こしに切り替えて使えます。
+
+## LLM 設定
+
+Web アプリでは LLM プロバイダを画面上部のセレクトボックスから選択できます。
+
+OpenAI / ChatGPT API を使う場合:
+
+```text
+OPENAI_API_KEY=your_api_key_here
+OPENAI_LLM_MODEL=gpt-4o-mini
+```
+
+ローカル推論の OpenAI 互換 API を使う場合:
+
+```text
+LOCAL_LLM_BASE_URL=http://127.0.0.1:8000/v1
+LOCAL_LLM_MODEL=openai/gpt-oss-120b
+LOCAL_LLM_API_KEY=your_local_api_key_here
+```
+
+初期選択を変える場合:
+
+```text
+LLM_PROVIDER=openai
+```
+
+または:
+
+```text
+LLM_PROVIDER=local
+```
+
+補足:
+
+- `local_settings.env` は `.gitignore` で除外されるため、API キーは Git に上がりません。
+- ローカル推論 API の `BASE_URL` は、OpenAI 互換エンドポイントの `/v1` まで含めて指定してください。
+- OpenAI API は Chat Completions 互換の形式で呼び出します。ローカル推論 API も同じ形式に対応している必要があります。
 
 ## 依存パッケージ
 

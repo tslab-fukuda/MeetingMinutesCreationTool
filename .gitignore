@@ -12,6 +12,8 @@ venv/
 .tmp_texlive/
 uvicorn_stdout.log
 uvicorn_stderr.log
+.env
+local_settings.env
 
 # Editors
 .vscode/

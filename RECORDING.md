@@ -63,10 +63,16 @@ python .\tools\transcribe_audio.py .\recordings\meeting_recording_20260425_15391
 
 ### APIキー
 
-文字起こしツールは、まず環境変数 `OPENAI_API_KEY` を参照します。  
+文字起こしツールは、まず `local_settings.env` または環境変数 `OPENAI_API_KEY` を参照します。  
 設定されていない場合は、このファイル内に直接書かれた `sk-...` 形式のキーも読み取れます。
 
 推奨:
+
+```text
+OPENAI_API_KEY="your_api_key_here"
+```
+
+一時的に PowerShell で設定する場合:
 
 ```powershell
 $env:OPENAI_API_KEY="your_api_key_here"

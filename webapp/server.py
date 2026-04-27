@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from tools.config import load_local_settings
 from tools.transcribe_audio import load_api_key
 
 try:
@@ -46,6 +47,8 @@ AUTO_HEADER_LINES = [
 ]
 AUTO_FOOTER_LINES = [r"\end{itemize}"]
 AUTO_EMPTY_ITEM = r"\item[]"
+
+load_local_settings(ROOT_DIR)
 
 
 def detect_encoding(path: Path) -> str:
@@ -117,6 +120,89 @@ def resolve_latexmk_command() -> tuple[str | None, dict[str, str]]:
     env = build_tex_env()
     latexmk_path = shutil.which("latexmk", path=env.get("PATH"))
     return latexmk_path, env
+
+
+def env_value(name: str) -> str:
+    return os.environ.get(name, "").strip()
+
+
+def llm_provider_configs() -> dict[str, dict[str, Any]]:
+    return {
+        "openai": {
+            "id": "openai",
+            "label": "OpenAI ChatGPT API",
+            "base_url": None,
+            "model": env_value("OPENAI_LLM_MODEL") or "gpt-4o-mini",
+            "api_key": env_value("OPENAI_API_KEY"),
+            "required": ["OPENAI_API_KEY"],
+        },
+        "local": {
+            "id": "local",
+            "label": "Local OpenAI-compatible LLM",
+            "base_url": env_value("LOCAL_LLM_BASE_URL"),
+            "model": env_value("LOCAL_LLM_MODEL") or "openai/gpt-oss-120b",
+            "api_key": env_value("LOCAL_LLM_API_KEY"),
+            "required": ["LOCAL_LLM_BASE_URL", "LOCAL_LLM_API_KEY"],
+        },
+    }
+
+
+def provider_snapshot(provider: dict[str, Any]) -> dict[str, Any]:
+    missing = [
+        key
+        for key in provider["required"]
+        if not env_value(key)
+    ]
+    return {
+        "id": provider["id"],
+        "label": provider["label"],
+        "model": provider["model"],
+        "base_url": provider["base_url"],
+        "configured": not missing,
+        "missing": missing,
+    }
+
+
+def default_llm_provider() -> str:
+    providers = llm_provider_configs()
+    configured_default = env_value("LLM_PROVIDER") or "openai"
+    if configured_default in providers and provider_snapshot(providers[configured_default])["configured"]:
+        return configured_default
+    for provider_id, provider in providers.items():
+        if provider_snapshot(provider)["configured"]:
+            return provider_id
+    return configured_default if configured_default in providers else "openai"
+
+
+def call_llm(provider_id: str, prompt: str, system: str | None = None) -> str:
+    if OpenAI is None:
+        raise RuntimeError("LLM calls require the openai package.")
+
+    providers = llm_provider_configs()
+    provider = providers.get(provider_id)
+    if provider is None:
+        raise RuntimeError(f"Unknown LLM provider: {provider_id}")
+
+    snapshot = provider_snapshot(provider)
+    if not snapshot["configured"]:
+        missing = ", ".join(snapshot["missing"])
+        raise RuntimeError(f"LLM provider '{provider_id}' is not configured: {missing}")
+
+    client_kwargs: dict[str, Any] = {"api_key": provider["api_key"]}
+    if provider["base_url"]:
+        client_kwargs["base_url"] = provider["base_url"]
+    client = OpenAI(**client_kwargs)
+
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    response = client.chat.completions.create(
+        model=provider["model"],
+        messages=messages,
+    )
+    return str(response.choices[0].message.content or "").strip()
 
 
 def escape_tex(text: str) -> str:
@@ -613,6 +699,7 @@ class MeetingAppState:
     compile_log: str = field(default="")
     compile_ok: bool | None = field(default=None)
     pdf_path: str | None = field(default=None)
+    llm_provider: str = field(default_factory=default_llm_provider)
 
     def __post_init__(self) -> None:
         self.lock = threading.RLock()
@@ -794,6 +881,46 @@ class MeetingAppState:
             "pdf_path": self.pdf_path,
         }
 
+    def llm_provider_snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            selected = self.llm_provider
+        providers = [provider_snapshot(provider) for provider in llm_provider_configs().values()]
+        return {
+            "selected": selected,
+            "providers": providers,
+        }
+
+    def set_llm_provider(self, provider_id: str) -> dict[str, Any]:
+        providers = llm_provider_configs()
+        provider = providers.get(provider_id)
+        if provider is None:
+            raise RuntimeError(f"Unknown LLM provider: {provider_id}")
+        snapshot = provider_snapshot(provider)
+        if not snapshot["configured"]:
+            missing = ", ".join(snapshot["missing"])
+            raise RuntimeError(f"LLM provider '{provider_id}' is not configured: {missing}")
+        with self.lock:
+            self.llm_provider = provider_id
+        self.add_log(f"llm-provider={provider_id}")
+        return {"ok": True, "selected": provider_id}
+
+    def chat_with_llm(
+        self,
+        *,
+        prompt: str,
+        system: str | None = None,
+        provider: str | None = None,
+    ) -> dict[str, Any]:
+        with self.lock:
+            provider_id = provider or self.llm_provider
+        text = call_llm(provider_id, prompt, system)
+        self.add_log(f"llm chat completed provider={provider_id}")
+        return {
+            "ok": True,
+            "provider": provider_id,
+            "text": text,
+        }
+
     def status_snapshot(self) -> dict[str, Any]:
         with self.lock:
             return {
@@ -822,6 +949,7 @@ class MeetingAppState:
                 "compile_ok": self.compile_ok,
                 "compile_log": self.compile_log,
                 "pdf_path": self.pdf_path,
+                "llm_provider": self.llm_provider,
             }
 
 
@@ -841,6 +969,16 @@ class SaveDocumentRequest(BaseModel):
 
 class AutoReflectRequest(BaseModel):
     enabled: bool
+
+
+class LlmProviderRequest(BaseModel):
+    provider: str
+
+
+class LlmChatRequest(BaseModel):
+    prompt: str
+    system: str | None = None
+    provider: str | None = None
 
 
 app = FastAPI(title="Meeting Minutes UI")
@@ -902,6 +1040,31 @@ def set_auto_reflect(request: AutoReflectRequest) -> dict[str, Any]:
 @app.post("/api/compile")
 def compile_document() -> dict[str, Any]:
     return manager.compile_document()
+
+
+@app.get("/api/llm/providers")
+def get_llm_providers() -> dict[str, Any]:
+    return manager.llm_provider_snapshot()
+
+
+@app.post("/api/llm/provider")
+def set_llm_provider(request: LlmProviderRequest) -> dict[str, Any]:
+    try:
+        return manager.set_llm_provider(request.provider)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/llm/chat")
+def chat_with_llm(request: LlmChatRequest) -> dict[str, Any]:
+    try:
+        return manager.chat_with_llm(
+            prompt=request.prompt,
+            system=request.system,
+            provider=request.provider,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/devices")
