@@ -156,6 +156,7 @@ exit /b %ERRORLEVEL%
 
 :create_pr_with_api
 set "CRED_REQ=%TEMP%\MeetingMinutesCreationTool_git_cred_%RANDOM%.txt"
+set "CRED_OUT=%TEMP%\MeetingMinutesCreationTool_git_cred_out_%RANDOM%.txt"
 (
   echo protocol=https
   echo host=github.com
@@ -163,10 +164,19 @@ set "CRED_REQ=%TEMP%\MeetingMinutesCreationTool_git_cred_%RANDOM%.txt"
 ) > "%CRED_REQ%"
 
 set "GITHUB_TOKEN="
-for /f "tokens=1,* delims==" %%A in ('"%GIT_CMD%" credential fill ^< "%CRED_REQ%"') do (
+"%GIT_CMD%" credential fill < "%CRED_REQ%" > "%CRED_OUT%"
+if errorlevel 1 (
+  del "%CRED_REQ%" >NUL 2>&1
+  del "%CRED_OUT%" >NUL 2>&1
+  echo [ERROR] Failed to read GitHub credential from Git Credential Manager.
+  exit /b 1
+)
+
+for /f "usebackq tokens=1,* delims==" %%A in ("%CRED_OUT%") do (
   if "%%A"=="password" set "GITHUB_TOKEN=%%B"
 )
 del "%CRED_REQ%" >NUL 2>&1
+del "%CRED_OUT%" >NUL 2>&1
 
 if not defined GITHUB_TOKEN (
   echo [ERROR] GitHub credential was not found.
