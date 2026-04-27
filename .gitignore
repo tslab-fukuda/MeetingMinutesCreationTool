@@ -17,6 +17,7 @@ local_settings.env
 
 # Editors
 .vscode/
+.history/
 
 # OS files
 .DS_Store

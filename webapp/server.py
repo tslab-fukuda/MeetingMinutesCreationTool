@@ -126,6 +126,14 @@ def env_value(name: str) -> str:
     return os.environ.get(name, "").strip()
 
 
+def first_env_value(*names: str) -> str:
+    for name in names:
+        value = env_value(name)
+        if value:
+            return value
+    return ""
+
+
 def llm_provider_configs() -> dict[str, dict[str, Any]]:
     return {
         "openai": {
@@ -139,19 +147,26 @@ def llm_provider_configs() -> dict[str, dict[str, Any]]:
         "local": {
             "id": "local",
             "label": "Local OpenAI-compatible LLM",
-            "base_url": env_value("LOCAL_LLM_BASE_URL"),
-            "model": env_value("LOCAL_LLM_MODEL") or "openai/gpt-oss-120b",
-            "api_key": env_value("LOCAL_LLM_API_KEY"),
-            "required": ["LOCAL_LLM_BASE_URL", "LOCAL_LLM_API_KEY"],
+            "base_url": first_env_value("LOCAL_LLM_BASE_URL", "BASE_URL"),
+            "model": first_env_value("LOCAL_LLM_MODEL", "MODEL") or "openai/gpt-oss-120b",
+            "api_key": first_env_value("LOCAL_LLM_API_KEY", "API_KEY"),
+            "required": [
+                ("LOCAL_LLM_BASE_URL", "BASE_URL"),
+                ("LOCAL_LLM_API_KEY", "API_KEY"),
+            ],
         },
     }
 
 
 def provider_snapshot(provider: dict[str, Any]) -> dict[str, Any]:
     missing = [
-        key
+        " or ".join(key) if isinstance(key, tuple) else key
         for key in provider["required"]
-        if not env_value(key)
+        if not (
+            first_env_value(*key)
+            if isinstance(key, tuple)
+            else env_value(key)
+        )
     ]
     return {
         "id": provider["id"],

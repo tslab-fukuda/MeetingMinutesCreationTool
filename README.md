@@ -222,6 +222,14 @@ LOCAL_LLM_MODEL=openai/gpt-oss-120b
 LOCAL_LLM_API_KEY=your_local_api_key_here
 ```
 
+次の短い名前でも同じ設定として読み込まれます:
+
+```text
+BASE_URL=http://127.0.0.1:8000/v1
+MODEL=openai/gpt-oss-120b
+API_KEY=your_local_api_key_here
+```
+
 初期選択を変える場合:
 
 ```text
