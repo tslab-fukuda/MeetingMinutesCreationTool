@@ -50,14 +50,14 @@ async function api(path, options = {}) {
 }
 
 function renderTranscript(entries) {
-  transcriptCount.textContent = `${entries.length} segments`;
+  transcriptCount.textContent = `${entries.length} recordings`;
   transcriptList.innerHTML = "";
   for (const entry of entries.slice().reverse()) {
     const wrapper = document.createElement("article");
     wrapper.className = "transcript-entry";
     wrapper.innerHTML = `
       <header>
-        <span>segment ${String(entry.index).padStart(3, "0")}</span>
+        <span>recording ${String(entry.index).padStart(3, "0")}</span>
         <span>${formatHms(entry.start_sec)} - ${formatHms(entry.end_sec)}</span>
       </header>
       <div>${entry.text ? entry.text.replaceAll("\n", "<br>") : "(no speech)"}</div>
