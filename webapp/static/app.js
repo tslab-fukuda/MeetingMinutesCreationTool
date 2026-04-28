@@ -14,7 +14,6 @@ const transcriptList = document.getElementById("transcript-list");
 const transcriptCount = document.getElementById("transcript-count");
 const warningText = document.getElementById("warning-text");
 const meterBar = document.getElementById("meter-bar");
-const agendaTarget = document.getElementById("agenda-target");
 const documentPath = document.getElementById("document-path");
 const logOutput = document.getElementById("log-output");
 const compileOutput = document.getElementById("compile-output");
@@ -25,9 +24,6 @@ const startButton = document.getElementById("start-button");
 const stopButton = document.getElementById("stop-button");
 const saveButton = document.getElementById("save-button");
 const compileButton = document.getElementById("compile-button");
-const targetCurrentButton = document.getElementById("target-current-button");
-const reflectSummaryButton = document.getElementById("reflect-summary-button");
-const nextTargetButton = document.getElementById("next-target-button");
 
 function formatHms(totalSeconds) {
   const total = Math.max(0, Math.floor(totalSeconds || 0));
@@ -66,16 +62,6 @@ function renderTranscript(entries) {
   }
 }
 
-function renderAgendaTarget(target, bufferSegments) {
-  if (!target || !target.count) {
-    agendaTarget.textContent = "-";
-    return;
-  }
-  const preview = target.preview || "(空の項目)";
-  const buffer = bufferSegments ? ` / 未反映 ${bufferSegments}件` : "";
-  agendaTarget.textContent = `${target.index + 1}/${target.count}: ${preview}${buffer}`;
-}
-
 async function refreshDocument(force = false) {
   const data = await api("/api/document");
   documentPath.textContent = data.path;
@@ -95,7 +81,6 @@ async function refreshStatus() {
   warningText.textContent = data.status_warning || "警告なし";
   meterBar.style.width = `${Math.min(100, (data.current_rms / 2500) * 100)}%`;
   autoReflectToggle.checked = data.auto_reflect;
-  renderAgendaTarget(data.agenda_target, data.agenda_buffer_segments);
   renderTranscript(data.transcript_entries || []);
   logOutput.textContent = (data.logs || []).join("\n");
   compileOutput.textContent = data.compile_log || "";
@@ -180,37 +165,6 @@ async function compileDocument() {
   compileOutput.textContent = result.log || "";
 }
 
-async function setAgendaTargetFromCursor() {
-  if (state.localDirty) {
-    await saveDocument();
-  }
-  await api("/api/agenda/target", {
-    method: "POST",
-    body: JSON.stringify({ cursor: texEditor.selectionStart }),
-  });
-  await refreshStatus();
-}
-
-async function reflectAgendaSummary() {
-  if (state.localDirty) {
-    await saveDocument();
-  }
-  const result = await api("/api/agenda/reflect", { method: "POST", body: "{}" });
-  if (!result.ok && result.detail) {
-    appendClientLog(result.detail);
-  }
-  await refreshDocument(true);
-  await refreshStatus();
-}
-
-async function moveToNextAgendaTarget() {
-  if (state.localDirty) {
-    await saveDocument();
-  }
-  await api("/api/agenda/next", { method: "POST", body: "{}" });
-  await refreshStatus();
-}
-
 function scheduleSave() {
   clearTimeout(state.saveHandle);
   state.saveHandle = setTimeout(async () => {
@@ -254,30 +208,6 @@ saveButton.addEventListener("click", async () => {
 compileButton.addEventListener("click", async () => {
   try {
     await compileDocument();
-  } catch (error) {
-    alert(error.message);
-  }
-});
-
-targetCurrentButton.addEventListener("click", async () => {
-  try {
-    await setAgendaTargetFromCursor();
-  } catch (error) {
-    alert(error.message);
-  }
-});
-
-reflectSummaryButton.addEventListener("click", async () => {
-  try {
-    await reflectAgendaSummary();
-  } catch (error) {
-    alert(error.message);
-  }
-});
-
-nextTargetButton.addEventListener("click", async () => {
-  try {
-    await moveToNextAgendaTarget();
   } catch (error) {
     alert(error.message);
   }
