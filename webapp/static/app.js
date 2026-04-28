@@ -133,10 +133,11 @@ async function syncSelectedApiProvider() {
 }
 
 async function saveDocument() {
-  await api("/api/document", {
+  const result = await api("/api/document", {
     method: "POST",
-    body: JSON.stringify({ text: texEditor.value }),
+    body: JSON.stringify({ text: texEditor.value, version: state.documentVersion }),
   });
+  state.documentVersion = result.version;
   state.localDirty = false;
   await refreshDocument(true);
 }

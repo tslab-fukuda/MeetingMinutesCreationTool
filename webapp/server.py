@@ -47,7 +47,6 @@ AUTO_HEADER_LINES = [
     r"\begin{itemize}",
 ]
 AUTO_FOOTER_LINES = [r"\end{itemize}"]
-AUTO_EMPTY_ITEM = r"\item[]"
 
 load_local_settings(ROOT_DIR)
 
@@ -257,10 +256,6 @@ def normalize_device_name(name: str) -> str:
 def device_dedupe_key(name: str) -> str:
     normalized = normalize_device_name(name).casefold()
     normalized = re.sub(r"^\d+[-\s]*", "", normalized)
-    normalized = re.sub(r"^(?:microphone|マイク)\s*\((?:\d+-\s*)?", "", normalized)
-    normalized = re.sub(r"^(?:line input|ライン入力)\s*\((?:\d+-\s*)?", "", normalized)
-    normalized = re.sub(r"^(?:stereo mixer|ステレオ ミキサー)\s*\((?:\d+-\s*)?", "", normalized)
-    normalized = re.sub(r"\)$", "", normalized)
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized.strip()
 
@@ -419,12 +414,9 @@ def extract_block_header_footer(block: str) -> tuple[list[str], list[str]]:
 
 def rebuild_auto_block(header: list[str], entries: dict[int, str], footer: list[str]) -> str:
     lines = list(header)
-    if entries:
-        for index in sorted(entries):
-            lines.append(f"% AUTO-SEGMENT: {index:03d}")
-            lines.extend(entries[index].splitlines() or [""])
-    else:
-        lines.append(AUTO_EMPTY_ITEM)
+    for index in sorted(entries):
+        lines.append(f"% AUTO-SEGMENT: {index:03d}")
+        lines.extend(entries[index].splitlines() or [""])
     lines.extend(footer)
     return "\n".join(lines)
 
@@ -440,17 +432,20 @@ def append_transcript_entry(tex_text: str, entry_id: int, time_label: str, trans
     return merged
 
 
-def merge_document_with_server(submitted_text: str, current_text: str) -> str:
+def merge_document_with_server(submitted_text: str, base_text: str, current_text: str) -> str:
     submitted = ensure_auto_block(submitted_text)
+    base = ensure_auto_block(base_text)
     current = ensure_auto_block(current_text)
     submitted_prefix, submitted_block, submitted_suffix = split_auto_block(submitted)
+    _base_prefix, base_block, _base_suffix = split_auto_block(base)
     current_prefix, current_block, current_suffix = split_auto_block(current)
     submitted_header, submitted_footer = extract_block_header_footer(submitted_block)
+    base_entries = parse_auto_entries(base_block)
     current_entries = parse_auto_entries(current_block)
     submitted_entries = parse_auto_entries(submitted_block)
-    max_submitted_id = max(submitted_entries.keys(), default=0)
+    max_base_id = max(base_entries.keys(), default=0)
     for entry_id, body in sorted(current_entries.items()):
-        if entry_id > max_submitted_id:
+        if entry_id > max_base_id and entry_id not in submitted_entries:
             submitted_entries[entry_id] = body
     merged_block = rebuild_auto_block(submitted_header, submitted_entries, submitted_footer)
     prefix = submitted_prefix if submitted_prefix != current_prefix else current_prefix
@@ -784,10 +779,12 @@ class MeetingAppState:
     def __post_init__(self) -> None:
         self.lock = threading.RLock()
         self.controller: RecordingController | None = None
+        self.document_history: dict[int, str] = {}
         text, encoding = prepare_daily_document(self.document_path)
         self.document_text = text
         self.document_encoding = encoding
         self.document_version = 1
+        self.document_history[self.document_version] = text
 
     def add_log(self, message: str) -> None:
         with self.lock:
@@ -799,6 +796,10 @@ class MeetingAppState:
         self.document_path.write_text(text, encoding=self.document_encoding)
         self.document_text = text
         self.document_version += 1
+        self.document_history[self.document_version] = text
+        if len(self.document_history) > 50:
+            oldest_version = min(self.document_history)
+            del self.document_history[oldest_version]
 
     def get_document(self) -> dict[str, Any]:
         with self.lock:
@@ -808,9 +809,14 @@ class MeetingAppState:
                 "version": self.document_version,
             }
 
-    def save_document(self, submitted_text: str) -> dict[str, Any]:
+    def save_document(self, submitted_text: str, submitted_version: int) -> dict[str, Any]:
         with self.lock:
-            merged = merge_document_with_server(submitted_text, self.document_text)
+            base_text = self.document_history.get(submitted_version)
+            if base_text is None:
+                raise RuntimeError(
+                    "The document changed while you were editing. Reload the latest text and try again."
+                )
+            merged = merge_document_with_server(submitted_text, base_text, self.document_text)
             self._write_document(merged)
             self.add_log("tex saved")
             return {
@@ -1048,6 +1054,7 @@ class StartRequest(BaseModel):
 
 class SaveDocumentRequest(BaseModel):
     text: str
+    version: int
 
 
 class AutoReflectRequest(BaseModel):
@@ -1091,7 +1098,10 @@ def get_document() -> dict[str, Any]:
 
 @app.post("/api/document")
 def save_document(request: SaveDocumentRequest) -> dict[str, Any]:
-    return manager.save_document(request.text)
+    try:
+        return manager.save_document(request.text, request.version)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/recording/start")
