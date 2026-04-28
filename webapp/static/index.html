@@ -20,7 +20,11 @@
             <option value="api">OpenAI API</option>
             <option value="none">No Transcript</option>
           </select>
-          <select id="llm-provider-select"></select>
+          <select id="llm-mode-select">
+            <option value="none">LLMなし</option>
+            <option value="llm">LLM</option>
+          </select>
+          <select id="llm-provider-select" hidden disabled></select>
           <button id="start-button" class="primary">録音開始</button>
           <button id="stop-button" class="danger">停止</button>
           <button id="save-button">TeX保存</button>

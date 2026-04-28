@@ -19,6 +19,7 @@ const logOutput = document.getElementById("log-output");
 const compileOutput = document.getElementById("compile-output");
 const deviceSelect = document.getElementById("device-select");
 const transcriberSelect = document.getElementById("transcriber-select");
+const llmModeSelect = document.getElementById("llm-mode-select");
 const llmProviderSelect = document.getElementById("llm-provider-select");
 const autoReflectToggle = document.getElementById("auto-reflect-toggle");
 const startButton = document.getElementById("start-button");
@@ -126,6 +127,13 @@ async function loadLlmProviders() {
   if (data.selected) {
     llmProviderSelect.value = data.selected;
   }
+  updateLlmProviderVisibility();
+}
+
+function updateLlmProviderVisibility() {
+  const llmEnabled = llmModeSelect.value === "llm";
+  llmProviderSelect.hidden = !llmEnabled;
+  llmProviderSelect.disabled = !llmEnabled;
 }
 
 async function saveDocument() {
@@ -231,9 +239,12 @@ llmProviderSelect.addEventListener("change", async () => {
   }
 });
 
+llmModeSelect.addEventListener("change", updateLlmProviderVisibility);
+
 async function boot() {
   await loadDevices();
   await loadLlmProviders();
+  updateLlmProviderVisibility();
   await refreshDocument(true);
   await refreshStatus();
   state.pollHandle = setInterval(async () => {

@@ -205,7 +205,7 @@ $env:OPENAI_API_KEY="your_api_key_here"
 
 ## LLM 設定
 
-Web アプリでは LLM プロバイダを画面上部のセレクトボックスから選択できます。
+Web アプリでは、画面上部で `LLM` を選んだ時だけ LLM プロバイダを選択できます。
 
 OpenAI / ChatGPT API を使う場合:
 
