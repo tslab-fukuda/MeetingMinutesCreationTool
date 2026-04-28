@@ -19,7 +19,6 @@ const logOutput = document.getElementById("log-output");
 const compileOutput = document.getElementById("compile-output");
 const deviceSelect = document.getElementById("device-select");
 const transcriberSelect = document.getElementById("transcriber-select");
-const llmModeSelect = document.getElementById("llm-mode-select");
 const llmProviderSelect = document.getElementById("llm-provider-select");
 const autoReflectToggle = document.getElementById("auto-reflect-toggle");
 const startButton = document.getElementById("start-button");
@@ -131,9 +130,9 @@ async function loadLlmProviders() {
 }
 
 function updateLlmProviderVisibility() {
-  const llmEnabled = llmModeSelect.value === "llm";
-  llmProviderSelect.hidden = !llmEnabled;
-  llmProviderSelect.disabled = !llmEnabled;
+  const apiSelected = transcriberSelect.value === "api";
+  llmProviderSelect.hidden = !apiSelected;
+  llmProviderSelect.disabled = !apiSelected;
 }
 
 async function saveDocument() {
@@ -239,12 +238,11 @@ llmProviderSelect.addEventListener("change", async () => {
   }
 });
 
-llmModeSelect.addEventListener("change", updateLlmProviderVisibility);
+transcriberSelect.addEventListener("change", updateLlmProviderVisibility);
 
 async function boot() {
   await loadDevices();
   await loadLlmProviders();
-  updateLlmProviderVisibility();
   await refreshDocument(true);
   await refreshStatus();
   state.pollHandle = setInterval(async () => {

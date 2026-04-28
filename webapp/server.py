@@ -138,7 +138,7 @@ def llm_provider_configs() -> dict[str, dict[str, Any]]:
     return {
         "openai": {
             "id": "openai",
-            "label": "OpenAI ChatGPT API",
+            "label": "ChatGPT",
             "base_url": None,
             "model": env_value("OPENAI_LLM_MODEL") or "gpt-4o-mini",
             "api_key": env_value("OPENAI_API_KEY"),
@@ -146,7 +146,7 @@ def llm_provider_configs() -> dict[str, dict[str, Any]]:
         },
         "local": {
             "id": "local",
-            "label": "Local OpenAI-compatible LLM",
+            "label": "ローカルLLM",
             "base_url": first_env_value("LOCAL_LLM_BASE_URL", "BASE_URL"),
             "model": first_env_value("LOCAL_LLM_MODEL", "MODEL") or "openai/gpt-oss-120b",
             "api_key": first_env_value("LOCAL_LLM_API_KEY", "API_KEY"),
