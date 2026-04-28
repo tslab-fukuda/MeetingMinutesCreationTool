@@ -8,8 +8,16 @@ __pycache__/
 .venv/
 venv/
 
+# Local setup artifacts
+.tmp_texlive/
+uvicorn_stdout.log
+uvicorn_stderr.log
+.env
+local_settings.env
+
 # Editors
 .vscode/
+.history/
 
 # OS files
 .DS_Store
@@ -22,8 +30,14 @@ __MACOSX/
 *.fdb_latexmk
 *.fls
 *.log
+*.out
 *.synctex.gz
+*.toc
+*.xdv
 *.pdf
+
+# Generated daily meeting minutes
+Texテンプレート2026/tmplate_minutes*.tex
 
 # Generated recordings and transcripts
 recordings/

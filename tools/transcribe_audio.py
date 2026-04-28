@@ -9,9 +9,16 @@ from pathlib import Path
 
 from openai import APIStatusError, OpenAI
 
+try:
+    from tools.config import load_local_settings
+except ModuleNotFoundError:
+    from config import load_local_settings
+
 
 DEFAULT_MODEL = "gpt-4o-mini-transcribe"
 MAX_FILE_SIZE_MB = 25
+
+load_local_settings()
 
 
 def build_parser() -> argparse.ArgumentParser:

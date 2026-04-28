@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import os
 import queue
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -20,6 +22,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from tools.config import load_local_settings
 from tools.transcribe_audio import load_api_key
 
 try:
@@ -35,7 +38,8 @@ except ImportError:
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT_DIR / "webapp" / "static"
-DEFAULT_DOCUMENT = ROOT_DIR / "Texテンプレート2026" / "tmplate.tex"
+TEMPLATE_DOCUMENT = ROOT_DIR / "Texテンプレート2026" / "tmplate.tex"
+MINUTES_DIR = TEMPLATE_DOCUMENT.parent
 AUTO_START = "% AUTO-TRANSCRIPT-START"
 AUTO_END = "% AUTO-TRANSCRIPT-END"
 AUTO_HEADER_LINES = [
@@ -43,6 +47,8 @@ AUTO_HEADER_LINES = [
     r"\begin{itemize}",
 ]
 AUTO_FOOTER_LINES = [r"\end{itemize}"]
+
+load_local_settings(ROOT_DIR)
 
 
 def detect_encoding(path: Path) -> str:
@@ -61,6 +67,172 @@ def read_text_with_encoding(path: Path) -> tuple[str, str]:
     return path.read_text(encoding=encoding), encoding
 
 
+def candidate_tex_bin_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    env_dir = os.environ.get("TEXLIVE_BIN")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    candidates.extend(
+        [
+            Path(r"C:\texlive\current\bin\windows"),
+            Path(r"C:\texlive\2026\bin\windows"),
+            Path(r"C:\texlive\2025\bin\windows"),
+        ]
+    )
+
+    texlive_root = Path(r"C:\texlive")
+    if texlive_root.exists():
+        for release_dir in sorted(texlive_root.iterdir(), reverse=True):
+            bin_dir = release_dir / "bin" / "windows"
+            candidates.append(bin_dir)
+
+    unique_candidates: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(candidate)
+    return unique_candidates
+
+
+def build_tex_env() -> dict[str, str]:
+    env = os.environ.copy()
+    path_entries = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
+    merged_entries = list(path_entries)
+    known_entries = {entry.lower() for entry in path_entries if entry}
+
+    for candidate in candidate_tex_bin_dirs():
+        if not candidate.exists():
+            continue
+        candidate_str = str(candidate)
+        if candidate_str.lower() not in known_entries:
+            merged_entries.insert(0, candidate_str)
+            known_entries.add(candidate_str.lower())
+
+    env["PATH"] = os.pathsep.join(entry for entry in merged_entries if entry)
+    return env
+
+
+def resolve_latexmk_command() -> tuple[str | None, dict[str, str]]:
+    env = build_tex_env()
+    latexmk_path = shutil.which("latexmk", path=env.get("PATH"))
+    return latexmk_path, env
+
+
+def env_value(name: str) -> str:
+    return os.environ.get(name, "").strip()
+
+
+def first_env_value(*names: str) -> str:
+    for name in names:
+        value = env_value(name)
+        if value:
+            return value
+    return ""
+
+
+def llm_provider_configs() -> dict[str, dict[str, Any]]:
+    return {
+        "openai": {
+            "id": "openai",
+            "label": "ChatGPT",
+            "base_url": None,
+            "model": env_value("OPENAI_LLM_MODEL") or "gpt-4o-mini",
+            "api_key": env_value("OPENAI_API_KEY") or (load_api_key() or ""),
+            "required": ["OPENAI_API_KEY"],
+        },
+        "local": {
+            "id": "local",
+            "label": "ローカルLLM",
+            "base_url": first_env_value("LOCAL_LLM_BASE_URL", "BASE_URL"),
+            "model": first_env_value("LOCAL_LLM_MODEL", "MODEL") or "openai/gpt-oss-120b",
+            "api_key": first_env_value("LOCAL_LLM_API_KEY", "API_KEY"),
+            "required": [
+                ("LOCAL_LLM_BASE_URL", "BASE_URL"),
+                ("LOCAL_LLM_API_KEY", "API_KEY"),
+            ],
+        },
+    }
+
+
+def provider_snapshot(provider: dict[str, Any]) -> dict[str, Any]:
+    missing = [
+        " or ".join(key) if isinstance(key, tuple) else key
+        for key in provider["required"]
+        if not (
+            first_env_value(*key)
+            if isinstance(key, tuple)
+            else (provider.get("api_key") if key == "OPENAI_API_KEY" else env_value(key))
+        )
+    ]
+    return {
+        "id": provider["id"],
+        "label": provider["label"],
+        "model": provider["model"],
+        "base_url": provider["base_url"],
+        "configured": not missing,
+        "missing": missing,
+    }
+
+
+def default_llm_provider() -> str:
+    providers = llm_provider_configs()
+    configured_default = env_value("LLM_PROVIDER") or "openai"
+    if configured_default in providers and provider_snapshot(providers[configured_default])["configured"]:
+        return configured_default
+    for provider_id, provider in providers.items():
+        if provider_snapshot(provider)["configured"]:
+            return provider_id
+    return configured_default if configured_default in providers else "openai"
+
+
+def call_llm(provider_id: str, prompt: str, system: str | None = None) -> str:
+    if OpenAI is None:
+        raise RuntimeError("LLM calls require the openai package.")
+
+    providers = llm_provider_configs()
+    provider = providers.get(provider_id)
+    if provider is None:
+        raise RuntimeError(f"Unknown LLM provider: {provider_id}")
+
+    snapshot = provider_snapshot(provider)
+    if not snapshot["configured"]:
+        missing = ", ".join(snapshot["missing"])
+        raise RuntimeError(f"LLM provider '{provider_id}' is not configured: {missing}")
+
+    client_kwargs: dict[str, Any] = {"api_key": provider["api_key"]}
+    if provider["base_url"]:
+        client_kwargs["base_url"] = provider["base_url"]
+    client = OpenAI(**client_kwargs)
+
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    response = client.chat.completions.create(
+        model=provider["model"],
+        messages=messages,
+    )
+    return str(response.choices[0].message.content or "").strip()
+
+
+def api_provider_from_transcriber_mode(transcriber_mode: str) -> str | None:
+    if transcriber_mode == "api":
+        return "openai"
+    if transcriber_mode.startswith("api:"):
+        provider_id = transcriber_mode.split(":", 1)[1].strip()
+        return provider_id or "openai"
+    return None
+
+
+def local_transcription_model(provider: dict[str, Any]) -> str:
+    return first_env_value("LOCAL_TRANSCRIBE_MODEL", "LOCAL_LLM_MODEL", "MODEL") or provider["model"]
+
+
 def escape_tex(text: str) -> str:
     replacements = {
         "\\": r"\textbackslash{}",
@@ -77,8 +249,56 @@ def escape_tex(text: str) -> str:
     return "".join(replacements.get(char, char) for char in text)
 
 
-def sanitize_device_name(name: str) -> str:
-    return "".join(char if 32 <= ord(char) < 127 else "?" for char in name)
+def normalize_device_name(name: str) -> str:
+    return "".join(char for char in name if char.isprintable()).strip()
+
+
+def device_dedupe_key(name: str) -> str:
+    normalized = normalize_device_name(name).casefold()
+    normalized = re.sub(r"^\d+[-\s]*", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
+def is_virtual_default_device(name: str) -> bool:
+    normalized = normalize_device_name(name).casefold()
+    return normalized in {
+        "microsoft sound mapper - input",
+        "プライマリ サウンド キャプチャ ドライバー",
+    }
+
+
+def device_priority(index: int, device: Any, default_input: int) -> tuple[int, int, int]:
+    if index == default_input:
+        return (0, 0, index)
+    hostapi = int(device.get("hostapi", 99))
+    hostapi_priority = {
+        2: 1,  # Windows WASAPI
+        0: 2,  # MME
+        1: 3,  # Windows DirectSound
+        3: 4,  # Windows WDM-KS
+    }.get(hostapi, 9)
+    return (1, hostapi_priority, index)
+
+
+def dedupe_input_devices(devices: Any, default_input: int) -> list[tuple[int, Any]]:
+    selected: dict[str, tuple[int, Any]] = {}
+    for index, device in enumerate(devices):
+        if int(device["max_input_channels"]) <= 0:
+            continue
+        if is_virtual_default_device(str(device["name"])):
+            continue
+        key = device_dedupe_key(str(device["name"]))
+        if not key:
+            key = str(index)
+        current = selected.get(key)
+        if current is None or device_priority(index, device, default_input) < device_priority(
+            current[0],
+            current[1],
+            default_input,
+        ):
+            selected[key] = (index, device)
+    return sorted(selected.values(), key=lambda item: item[0])
 
 
 def format_hms(seconds: float) -> str:
@@ -130,6 +350,24 @@ def ensure_auto_block(text: str) -> str:
     if end_document in text:
         return text.replace(end_document, block + end_document, 1)
     return text.rstrip() + "\n\n" + block
+
+
+def daily_document_path() -> Path:
+    date_label = env_value("MEETING_MINUTES_DATE") or datetime.now().strftime("%Y%m%d")
+    if not re.fullmatch(r"\d{8}", date_label):
+        raise RuntimeError("MEETING_MINUTES_DATE must be in YYYYMMDD format.")
+    return MINUTES_DIR / f"tmplate_minutes{date_label}.tex"
+
+
+def prepare_daily_document(document_path: Path) -> tuple[str, str]:
+    if document_path.exists():
+        text, encoding = read_text_with_encoding(document_path)
+        return ensure_auto_block(text), encoding
+
+    template_text, encoding = read_text_with_encoding(TEMPLATE_DOCUMENT)
+    text = ensure_auto_block(template_text)
+    document_path.write_text(text, encoding=encoding)
+    return text, encoding
 
 
 def split_auto_block(text: str) -> tuple[str, str, str]:
@@ -194,17 +432,20 @@ def append_transcript_entry(tex_text: str, entry_id: int, time_label: str, trans
     return merged
 
 
-def merge_document_with_server(submitted_text: str, current_text: str) -> str:
+def merge_document_with_server(submitted_text: str, base_text: str, current_text: str) -> str:
     submitted = ensure_auto_block(submitted_text)
+    base = ensure_auto_block(base_text)
     current = ensure_auto_block(current_text)
     submitted_prefix, submitted_block, submitted_suffix = split_auto_block(submitted)
+    _base_prefix, base_block, _base_suffix = split_auto_block(base)
     current_prefix, current_block, current_suffix = split_auto_block(current)
     submitted_header, submitted_footer = extract_block_header_footer(submitted_block)
+    base_entries = parse_auto_entries(base_block)
     current_entries = parse_auto_entries(current_block)
     submitted_entries = parse_auto_entries(submitted_block)
-    max_submitted_id = max(submitted_entries.keys(), default=0)
+    max_base_id = max(base_entries.keys(), default=0)
     for entry_id, body in sorted(current_entries.items()):
-        if entry_id > max_submitted_id:
+        if entry_id > max_base_id and entry_id not in submitted_entries:
             submitted_entries[entry_id] = body
     merged_block = rebuild_auto_block(submitted_header, submitted_entries, submitted_footer)
     prefix = submitted_prefix if submitted_prefix != current_prefix else current_prefix
@@ -243,16 +484,28 @@ class LocalTranscriber:
 
 
 class ApiTranscriber:
-    def __init__(self, model_name: str, language: str | None, prompt: str | None) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        language: str | None,
+        prompt: str | None,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        missing_message: str = "OPENAI_API_KEY is not set.",
+    ) -> None:
         if OpenAI is None:
             raise RuntimeError(
                 "API transcription requires the openai package. "
                 "Run 'python -m pip install openai'."
             )
-        api_key = load_api_key()
+        api_key = (api_key or load_api_key() or "").strip()
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set.")
-        self.client = OpenAI(api_key=api_key)
+            raise RuntimeError(missing_message)
+        client_kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self.client = OpenAI(**client_kwargs)
         self.model_name = model_name
         self.language = language
         self.prompt = prompt
@@ -332,7 +585,28 @@ class RecordingController:
             return None
         if transcriber_mode == "local":
             return LocalTranscriber(local_model, language, prompt)
-        return ApiTranscriber(api_model, language, prompt)
+        api_provider = api_provider_from_transcriber_mode(transcriber_mode)
+        if api_provider == "openai":
+            model_name = env_value("OPENAI_TRANSCRIBE_MODEL") or api_model
+            return ApiTranscriber(model_name, language, prompt)
+        if api_provider:
+            providers = llm_provider_configs()
+            provider = providers.get(api_provider)
+            if provider is None:
+                raise RuntimeError(f"Unknown API provider: {api_provider}")
+            snapshot = provider_snapshot(provider)
+            if not snapshot["configured"]:
+                missing = ", ".join(snapshot["missing"])
+                raise RuntimeError(f"API provider '{api_provider}' is not configured: {missing}")
+            return ApiTranscriber(
+                local_transcription_model(provider),
+                language,
+                prompt,
+                api_key=provider["api_key"],
+                base_url=provider["base_url"],
+                missing_message=f"API provider '{api_provider}' is not configured.",
+            )
+        raise RuntimeError(f"Unknown transcriber mode: {transcriber_mode}")
 
     def start(self) -> None:
         self.thread.start()
@@ -481,7 +755,7 @@ class RecordingController:
 
 @dataclass
 class MeetingAppState:
-    document_path: Path = DEFAULT_DOCUMENT
+    document_path: Path = field(default_factory=daily_document_path)
     document_encoding: str = field(default="utf-8")
     document_text: str = field(default="")
     document_version: int = field(default=0)
@@ -500,14 +774,17 @@ class MeetingAppState:
     compile_log: str = field(default="")
     compile_ok: bool | None = field(default=None)
     pdf_path: str | None = field(default=None)
+    llm_provider: str = field(default_factory=default_llm_provider)
 
     def __post_init__(self) -> None:
         self.lock = threading.RLock()
         self.controller: RecordingController | None = None
-        text, encoding = read_text_with_encoding(self.document_path)
-        self.document_text = ensure_auto_block(text)
+        self.document_history: dict[int, str] = {}
+        text, encoding = prepare_daily_document(self.document_path)
+        self.document_text = text
         self.document_encoding = encoding
         self.document_version = 1
+        self.document_history[self.document_version] = text
 
     def add_log(self, message: str) -> None:
         with self.lock:
@@ -519,6 +796,10 @@ class MeetingAppState:
         self.document_path.write_text(text, encoding=self.document_encoding)
         self.document_text = text
         self.document_version += 1
+        self.document_history[self.document_version] = text
+        if len(self.document_history) > 50:
+            oldest_version = min(self.document_history)
+            del self.document_history[oldest_version]
 
     def get_document(self) -> dict[str, Any]:
         with self.lock:
@@ -528,9 +809,14 @@ class MeetingAppState:
                 "version": self.document_version,
             }
 
-    def save_document(self, submitted_text: str) -> dict[str, Any]:
+    def save_document(self, submitted_text: str, submitted_version: int) -> dict[str, Any]:
         with self.lock:
-            merged = merge_document_with_server(submitted_text, self.document_text)
+            base_text = self.document_history.get(submitted_version)
+            if base_text is None:
+                raise RuntimeError(
+                    "The document changed while you were editing. Reload the latest text and try again."
+                )
+            merged = merge_document_with_server(submitted_text, base_text, self.document_text)
             self._write_document(merged)
             self.add_log("tex saved")
             return {
@@ -609,6 +895,9 @@ class MeetingAppState:
             if self.recording_active:
                 raise RuntimeError("Recording is already active.")
             self.auto_reflect = auto_reflect
+        api_provider = api_provider_from_transcriber_mode(transcriber_mode)
+        if api_provider:
+            self.set_llm_provider(api_provider)
 
         controller = RecordingController(
             self,
@@ -636,27 +925,89 @@ class MeetingAppState:
         controller.stop()
 
     def compile_document(self) -> dict[str, Any]:
+        latexmk_command, tex_env = resolve_latexmk_command()
+        if not latexmk_command:
+            message = (
+                "latexmk was not found. Run setup_texlive.bat or install TeX Live "
+                "with uplatex and dvipdfmx."
+            )
+            with self.lock:
+                self.compile_log = message
+                self.compile_ok = False
+                self.pdf_path = None
+            self.add_log("latex compile failed")
+            return {
+                "ok": False,
+                "log": message,
+                "pdf_path": None,
+            }
+
         result = subprocess.run(
-            ["latexmk", str(self.document_path)],
+            [latexmk_command, str(self.document_path)],
             cwd=ROOT_DIR,
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=tex_env,
         )
         compile_log = (result.stdout + "\n" + result.stderr).strip()
-        pdf_path = ROOT_DIR / f"{self.document_path.stem}.pdf"
+        pdf_candidates = [
+            ROOT_DIR / f"{self.document_path.stem}.pdf",
+            self.document_path.with_suffix(".pdf"),
+        ]
+        pdf_path = next((path for path in pdf_candidates if path.exists()), None)
         with self.lock:
             self.compile_log = compile_log
             self.compile_ok = result.returncode == 0
             self.pdf_path = (
-                str(pdf_path.relative_to(ROOT_DIR)) if pdf_path.exists() else None
+                str(pdf_path.relative_to(ROOT_DIR)) if pdf_path is not None else None
             )
         self.add_log("latex compiled" if result.returncode == 0 else "latex compile failed")
         return {
             "ok": result.returncode == 0,
             "log": compile_log,
             "pdf_path": self.pdf_path,
+        }
+
+    def llm_provider_snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            selected = self.llm_provider
+        providers = [provider_snapshot(provider) for provider in llm_provider_configs().values()]
+        return {
+            "selected": selected,
+            "providers": providers,
+        }
+
+    def set_llm_provider(self, provider_id: str) -> dict[str, Any]:
+        providers = llm_provider_configs()
+        provider = providers.get(provider_id)
+        if provider is None:
+            raise RuntimeError(f"Unknown LLM provider: {provider_id}")
+        snapshot = provider_snapshot(provider)
+        if not snapshot["configured"]:
+            missing = ", ".join(snapshot["missing"])
+            raise RuntimeError(f"LLM provider '{provider_id}' is not configured: {missing}")
+        with self.lock:
+            self.llm_provider = provider_id
+        self.add_log(f"llm-provider={provider_id}")
+        return {"ok": True, "selected": provider_id}
+
+    def chat_with_llm(
+        self,
+        *,
+        prompt: str,
+        system: str | None = None,
+        provider: str | None = None,
+    ) -> dict[str, Any]:
+        with self.lock:
+            provider_id = provider or self.llm_provider
+        text = call_llm(provider_id, prompt, system)
+        self.add_log(f"llm chat completed provider={provider_id}")
+        return {
+            "ok": True,
+            "provider": provider_id,
+            "text": text,
         }
 
     def status_snapshot(self) -> dict[str, Any]:
@@ -687,6 +1038,7 @@ class MeetingAppState:
                 "compile_ok": self.compile_ok,
                 "compile_log": self.compile_log,
                 "pdf_path": self.pdf_path,
+                "llm_provider": self.llm_provider,
             }
 
 
@@ -702,10 +1054,21 @@ class StartRequest(BaseModel):
 
 class SaveDocumentRequest(BaseModel):
     text: str
+    version: int
 
 
 class AutoReflectRequest(BaseModel):
     enabled: bool
+
+
+class LlmProviderRequest(BaseModel):
+    provider: str
+
+
+class LlmChatRequest(BaseModel):
+    prompt: str
+    system: str | None = None
+    provider: str | None = None
 
 
 app = FastAPI(title="Meeting Minutes UI")
@@ -735,7 +1098,10 @@ def get_document() -> dict[str, Any]:
 
 @app.post("/api/document")
 def save_document(request: SaveDocumentRequest) -> dict[str, Any]:
-    return manager.save_document(request.text)
+    try:
+        return manager.save_document(request.text, request.version)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/recording/start")
@@ -769,16 +1135,41 @@ def compile_document() -> dict[str, Any]:
     return manager.compile_document()
 
 
+@app.get("/api/llm/providers")
+def get_llm_providers() -> dict[str, Any]:
+    return manager.llm_provider_snapshot()
+
+
+@app.post("/api/llm/provider")
+def set_llm_provider(request: LlmProviderRequest) -> dict[str, Any]:
+    try:
+        return manager.set_llm_provider(request.provider)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/llm/chat")
+def chat_with_llm(request: LlmChatRequest) -> dict[str, Any]:
+    try:
+        return manager.chat_with_llm(
+            prompt=request.prompt,
+            system=request.system,
+            provider=request.provider,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/devices")
 def get_devices() -> dict[str, Any]:
     devices = sd.query_devices()
     default_input, default_output = sd.default.device
     items = []
-    for index, device in enumerate(devices):
+    for index, device in dedupe_input_devices(devices, default_input):
         items.append(
             {
                 "id": index,
-                "name": sanitize_device_name(str(device["name"])),
+                "name": normalize_device_name(str(device["name"])),
                 "max_input_channels": device["max_input_channels"],
                 "is_default_input": index == default_input,
                 "is_default_output": index == default_output,

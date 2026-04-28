@@ -109,16 +109,41 @@ async function loadDevices() {
   }
 }
 
-async function saveDocument() {
-  await api("/api/document", {
+function appendClientLog(message) {
+  logOutput.textContent += `${logOutput.textContent ? "\n" : ""}${message}`;
+}
+
+function selectedApiProvider() {
+  const [mode, provider] = transcriberSelect.value.split(":");
+  if (mode !== "api") {
+    return null;
+  }
+  return provider || "openai";
+}
+
+async function syncSelectedApiProvider() {
+  const provider = selectedApiProvider();
+  if (!provider) {
+    return;
+  }
+  await api("/api/llm/provider", {
     method: "POST",
-    body: JSON.stringify({ text: texEditor.value }),
+    body: JSON.stringify({ provider }),
   });
+}
+
+async function saveDocument() {
+  const result = await api("/api/document", {
+    method: "POST",
+    body: JSON.stringify({ text: texEditor.value, version: state.documentVersion }),
+  });
+  state.documentVersion = result.version;
   state.localDirty = false;
   await refreshDocument(true);
 }
 
 async function startRecording() {
+  await syncSelectedApiProvider();
   await api("/api/recording/start", {
     method: "POST",
     body: JSON.stringify({
@@ -200,15 +225,43 @@ autoReflectToggle.addEventListener("change", async () => {
   }
 });
 
+transcriberSelect.addEventListener("change", async () => {
+  try {
+    await syncSelectedApiProvider();
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
 async function boot() {
-  await loadDevices();
-  await refreshDocument(true);
-  await refreshStatus();
+  try {
+    await refreshDocument(true);
+  } catch (error) {
+    appendClientLog(`document load failed: ${error.message}`);
+  }
+
+  try {
+    await loadDevices();
+  } catch (error) {
+    deviceSelect.innerHTML = "";
+    const defaultOption = document.createElement("option");
+    defaultOption.value = "";
+    defaultOption.textContent = "Default Input Device";
+    deviceSelect.appendChild(defaultOption);
+    appendClientLog(`device load failed: ${error.message}`);
+  }
+
+  try {
+    await refreshStatus();
+  } catch (error) {
+    appendClientLog(`status failed: ${error.message}`);
+  }
+
   state.pollHandle = setInterval(async () => {
     try {
       await refreshStatus();
     } catch (error) {
-      logOutput.textContent += `\nstatus failed: ${error.message}`;
+      appendClientLog(`status failed: ${error.message}`);
     }
   }, 2000);
 }

@@ -63,11 +63,35 @@ if errorlevel 1 (
 if not exist "recordings" mkdir recordings
 if not exist "transcripts" mkdir transcripts
 
+if not exist "local_settings.env" if exist "local_settings.env.example" (
+  echo [INFO] Creating local_settings.env from example...
+  copy "local_settings.env.example" "local_settings.env" >NUL
+)
+
 echo.
 echo [INFO] Checking external commands...
 call :check_command latexmk "TeX compile"
 call :check_command uplatex "Japanese TeX compile"
 call :check_command dvipdfmx "DVI to PDF conversion"
+
+set "NEED_TEX_SETUP="
+where latexmk >NUL 2>&1
+if errorlevel 1 set "NEED_TEX_SETUP=1"
+where uplatex >NUL 2>&1
+if errorlevel 1 set "NEED_TEX_SETUP=1"
+where dvipdfmx >NUL 2>&1
+if errorlevel 1 set "NEED_TEX_SETUP=1"
+
+if defined NEED_TEX_SETUP (
+  echo.
+  echo [INFO] TeX commands were not fully available.
+  echo [INFO] Running setup_texlive.bat...
+  call "%~dp0setup_texlive.bat"
+  if errorlevel 1 (
+    echo [ERROR] setup_texlive.bat did not finish successfully.
+    goto :fail
+  )
+)
 
 echo.
 echo ==========================================
