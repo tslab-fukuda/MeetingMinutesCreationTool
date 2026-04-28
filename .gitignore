@@ -36,6 +36,9 @@ __MACOSX/
 *.xdv
 *.pdf
 
+# Generated daily meeting minutes
+Texテンプレート2026/tmplate_minutes*.tex
+
 # Generated recordings and transcripts
 recordings/
 transcripts/
