@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import json
 import os
 import queue
 import re
@@ -325,14 +324,24 @@ def rms_value(audio: np.ndarray) -> float:
     return math.sqrt(float(np.mean(squared)))
 
 
-def choose_session_paths(prefix: str) -> tuple[Path, Path]:
+def choose_session_paths(prefix: str) -> tuple[Path, Path, Path]:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = f"{prefix}_{stamp}"
     master_path = ROOT_DIR / "recordings" / f"{stem}.wav"
     transcript_path = ROOT_DIR / "transcripts" / f"{stem}.live.txt"
+    segments_dir = ROOT_DIR / "recordings" / "segments" / stem
     master_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
-    return master_path, transcript_path
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    return master_path, transcript_path, segments_dir
+
+
+def write_wav(path: Path, samplerate: int, channels: int, audio: np.ndarray) -> None:
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(samplerate)
+        wav_file.writeframes(audio.tobytes())
 
 
 def ensure_auto_block(text: str) -> str:
@@ -561,32 +570,6 @@ def insert_agenda_summary(
     return updated, safe_index + 1
 
 
-def insert_agenda_summaries(
-    tex_text: str,
-    target_index: int,
-    summaries: list[str],
-    *,
-    replace_non_empty: bool = False,
-) -> tuple[str, int]:
-    normalized = normalize_summary_items(summaries)
-    if not normalized:
-        return tex_text, clamp_agenda_target_index(tex_text, target_index)
-
-    targets = agenda_item_targets(tex_text)
-    if not targets:
-        raise RuntimeError("No \\item target was found in the TeX document.")
-
-    safe_index = max(0, min(target_index, len(targets) - 1))
-    target = targets[safe_index]
-    lines = [f"{target.indent}\\item {escape_tex(summary)}" for summary in normalized]
-    block = "\n".join(lines)
-    if target.empty or replace_non_empty:
-        updated = tex_text[: target.start] + block + tex_text[target.end :]
-    else:
-        updated = tex_text[: target.end] + "\n" + block + tex_text[target.end :]
-    return updated, safe_index + len(normalized) - 1
-
-
 def transcript_has_minutes_content(text: str) -> bool:
     normalized = text.strip()
     if not normalized:
@@ -604,17 +587,6 @@ def compact_transcript_text(text: str, limit: int = 180) -> str:
     return compacted[: limit - 1].rstrip() + "…"
 
 
-def normalize_summary_items(items: list[Any]) -> list[str]:
-    summaries: list[str] = []
-    for item in items:
-        text = str(item).strip()
-        text = re.sub(r"^\s*[-・*]\s*", "", text)
-        text = re.sub(r"\s+", " ", text).strip()
-        if text:
-            summaries.append(text)
-    return summaries
-
-
 def summarize_minutes_item(provider_id: str, transcript: str) -> str:
     system = (
         "あなたは日本語の会議議事録作成アシスタントです。"
@@ -629,39 +601,6 @@ def summarize_minutes_item(provider_id: str, transcript: str) -> str:
     summary = call_llm(provider_id, prompt, system)
     summary = re.sub(r"^\s*[-・*]\s*", "", summary).strip()
     return summary or compact_transcript_text(transcript)
-
-
-def summarize_minutes_items(provider_id: str, transcript: str) -> list[str]:
-    system = (
-        "あなたは日本語の会議議事録作成アシスタントです。"
-        "会話全体を内容のまとまりごとに分け、議事録の itemize に入れる文へ要約してください。"
-        "出力はJSON配列のみです。各要素はLaTeXコマンドや箇条書き記号を含まない日本語文にしてください。"
-    )
-    prompt = (
-        "次の会話文を、内容に応じて1件から10件程度の議事録項目へ分割要約してください。"
-        "決定事項、依頼事項、継続審議、担当者、期限が分かる場合は優先してください。"
-        "同じ話題は1項目にまとめ、話題が変わったら別項目にしてください。\n\n"
-        f"{transcript}"
-    )
-    response_text = call_llm(provider_id, prompt, system).strip()
-    if response_text.startswith("```"):
-        response_text = re.sub(r"^```(?:json)?\s*", "", response_text, flags=re.IGNORECASE)
-        response_text = re.sub(r"\s*```$", "", response_text).strip()
-    try:
-        parsed = json.loads(response_text)
-        if isinstance(parsed, list):
-            summaries = normalize_summary_items(parsed)
-            if summaries:
-                return summaries
-    except json.JSONDecodeError:
-        pass
-
-    lines = [
-        re.sub(r"^\s*(?:[-・*]|\d+[.)、])\s*", "", line).strip()
-        for line in response_text.splitlines()
-    ]
-    summaries = normalize_summary_items([line for line in lines if line])
-    return summaries or [compact_transcript_text(transcript)]
 
 
 def merge_document_with_server(submitted_text: str, current_text: str) -> str:
@@ -769,6 +708,7 @@ class RecordingController:
         device: int | None,
         samplerate: int,
         channels: int,
+        segment_seconds: float,
         status_seconds: float,
         warn_rms: float,
         transcriber_mode: str,
@@ -781,11 +721,14 @@ class RecordingController:
         self.device = device
         self.samplerate = samplerate
         self.channels = channels
+        self.segment_seconds = segment_seconds
         self.status_seconds = status_seconds
         self.warn_rms = warn_rms
         self.language = language
         self.prompt = prompt
-        self.master_path, self.transcript_path = choose_session_paths("meeting_session")
+        self.master_path, self.transcript_path, self.segments_dir = choose_session_paths(
+            "meeting_session"
+        )
         self.audio_queue: queue.Queue[np.ndarray] = queue.Queue()
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -838,7 +781,7 @@ class RecordingController:
 
     def stop(self) -> None:
         self.stop_event.set()
-        self.thread.join()
+        self.thread.join(timeout=5.0)
 
     def _transcribe_segment(self, path: Path) -> str:
         if self.transcriber is None:
@@ -847,7 +790,11 @@ class RecordingController:
 
     def _run(self) -> None:
         total_frames = 0
+        segment_frames = 0
+        segment_index = 1
         silence_warnings = 0
+        segment_audio: list[np.ndarray] = []
+        segment_target_frames = int(self.segment_seconds * self.samplerate)
         last_status_time = time.time()
 
         def callback(indata: np.ndarray, frames: int, time_info, status) -> None:
@@ -855,34 +802,12 @@ class RecordingController:
                 self.manager.add_log(f"audio-status: {status}")
             self.audio_queue.put(indata.copy())
 
-        def write_chunk(wav_file: wave.Wave_write, chunk: np.ndarray) -> None:
-            nonlocal total_frames, silence_warnings, last_status_time
-            wav_file.writeframes(chunk.tobytes())
-            total_frames += len(chunk)
-
-            now = time.time()
-            if now - last_status_time >= self.status_seconds:
-                elapsed = total_frames / self.samplerate
-                current_rms = rms_value(chunk)
-                file_size_mb = self.master_path.stat().st_size / (1024 * 1024)
-                warning = ""
-                if current_rms < self.warn_rms:
-                    silence_warnings += 1
-                    warning = "low-input"
-                else:
-                    silence_warnings = 0
-                if silence_warnings >= 3:
-                    warning = "check microphone or input device"
-                self.manager.on_status(elapsed, file_size_mb, current_rms, warning)
-                last_status_time = now
-
         self.manager.on_recording_started(
             self.master_path,
             self.transcript_path,
             self.transcriber_mode,
         )
 
-        recording_failed = False
         try:
             with wave.open(str(self.master_path), "wb") as wav_file:
                 wav_file.setnchannels(self.channels)
@@ -902,47 +827,98 @@ class RecordingController:
                         except queue.Empty:
                             continue
 
-                        write_chunk(wav_file, chunk)
+                        wav_file.writeframes(chunk.tobytes())
+                        total_frames += len(chunk)
+                        segment_frames += len(chunk)
+                        segment_audio.append(chunk)
                         self.audio_queue.task_done()
 
-                    while True:
-                        try:
-                            chunk = self.audio_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                        write_chunk(wav_file, chunk)
-                        self.audio_queue.task_done()
+                        now = time.time()
+                        if now - last_status_time >= self.status_seconds:
+                            elapsed = total_frames / self.samplerate
+                            current_rms = rms_value(chunk)
+                            file_size_mb = self.master_path.stat().st_size / (1024 * 1024)
+                            warning = ""
+                            if current_rms < self.warn_rms:
+                                silence_warnings += 1
+                                warning = "low-input"
+                            else:
+                                silence_warnings = 0
+                            if silence_warnings >= 3:
+                                warning = "check microphone or input device"
+                            self.manager.on_status(elapsed, file_size_mb, current_rms, warning)
+                            last_status_time = now
+
+                        if segment_frames >= segment_target_frames:
+                            merged = np.concatenate(segment_audio, axis=0)
+                            segment_end = total_frames / self.samplerate
+                            segment_start = max(
+                                0.0,
+                                segment_end - (len(merged) / self.samplerate),
+                            )
+                            segment_path = self.segments_dir / f"segment_{segment_index:03d}.wav"
+                            write_wav(segment_path, self.samplerate, self.channels, merged)
+                            self._handle_segment(
+                                segment_index,
+                                segment_start,
+                                segment_end,
+                                segment_path,
+                            )
+                            segment_index += 1
+                            segment_frames = 0
+                            segment_audio = []
         except Exception as exc:
-            recording_failed = True
             self.manager.add_log(f"recording failed: {exc}")
         finally:
+            while True:
+                try:
+                    chunk = self.audio_queue.get_nowait()
+                except queue.Empty:
+                    break
+                total_frames += len(chunk)
+                segment_frames += len(chunk)
+                segment_audio.append(chunk)
+                self.audio_queue.task_done()
+
+            if segment_audio:
+                merged = np.concatenate(segment_audio, axis=0)
+                segment_end = total_frames / self.samplerate
+                segment_start = max(0.0, segment_end - (len(merged) / self.samplerate))
+                segment_path = self.segments_dir / f"segment_{segment_index:03d}.wav"
+                write_wav(segment_path, self.samplerate, self.channels, merged)
+                self._handle_segment(segment_index, segment_start, segment_end, segment_path)
+
             duration = total_frames / self.samplerate if self.samplerate else 0.0
-            if not recording_failed and total_frames > 0:
-                self.manager.add_log("transcribing full recording")
-                self._handle_recording(duration)
             self.manager.on_recording_finished(duration)
 
-    def _handle_recording(
+    def _handle_segment(
         self,
-        duration: float,
+        index: int,
+        start_sec: float,
+        end_sec: float,
+        segment_path: Path,
     ) -> None:
         try:
-            transcript = self._transcribe_segment(self.master_path)
+            transcript = self._transcribe_segment(segment_path)
         except Exception as exc:
             transcript = f"[transcription failed: {exc}]"
 
-        header = f"[recording 001 00:00:00 - {format_hms(duration)}]"
+        header = f"[segment {index:03d} {format_hms(start_sec)} - {format_hms(end_sec)}]"
         with self.transcript_path.open("a", encoding="utf-8") as fh:
             fh.write(f"{header}\n{transcript}\n\n")
         self.manager.on_transcript(
             TranscriptEntry(
-                index=1,
-                start_sec=0.0,
-                end_sec=duration,
+                index=index,
+                start_sec=start_sec,
+                end_sec=end_sec,
                 text=transcript,
                 source=self.transcriber_mode,
             )
         )
+        try:
+            segment_path.unlink()
+        except OSError:
+            pass
 
 
 @dataclass
@@ -1050,16 +1026,16 @@ class MeetingAppState:
             return {"ok": False, "detail": "No transcript is available for the current agenda item."}
 
         try:
-            summaries = summarize_minutes_items(provider_id, transcript)
+            summary = summarize_minutes_item(provider_id, transcript)
         except Exception as exc:
             self.add_log(f"summary failed: {exc}")
-            summaries = [compact_transcript_text(transcript)]
+            summary = compact_transcript_text(transcript)
 
         with self.lock:
-            updated_text, target_index = insert_agenda_summaries(
+            updated_text, target_index = insert_agenda_summary(
                 self.document_text,
                 self.agenda_target_index,
-                summaries,
+                summary,
                 replace_non_empty=self.agenda_target_generated,
             )
             self.agenda_target_index = target_index
@@ -1069,8 +1045,7 @@ class MeetingAppState:
         self.add_log("agenda summary reflected")
         return {
             "ok": True,
-            "summary": "\n".join(summaries),
-            "summaries": summaries,
+            "summary": summary,
             "agenda_target": snapshot,
             "version": self.document_version,
         }
@@ -1117,7 +1092,7 @@ class MeetingAppState:
                 should_reflect = self.auto_reflect
         if should_reflect:
             self.reflect_current_agenda_summary()
-        self.add_log("recording transcript received")
+        self.add_log(f"transcript segment {entry.index:03d} received")
 
     def on_recording_finished(self, duration: float) -> None:
         with self.lock:
@@ -1148,6 +1123,7 @@ class MeetingAppState:
             device=device,
             samplerate=16000,
             channels=1,
+            segment_seconds=15.0,
             status_seconds=2.0,
             warn_rms=120.0,
             transcriber_mode=transcriber_mode,
