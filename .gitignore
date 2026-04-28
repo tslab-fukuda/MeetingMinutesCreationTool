@@ -30,7 +30,10 @@ __MACOSX/
 *.fdb_latexmk
 *.fls
 *.log
+*.out
 *.synctex.gz
+*.toc
+*.xdv
 *.pdf
 
 # Generated recordings and transcripts

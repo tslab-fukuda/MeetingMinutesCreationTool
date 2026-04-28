@@ -38,7 +38,8 @@ except ImportError:
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT_DIR / "webapp" / "static"
-DEFAULT_DOCUMENT = ROOT_DIR / "Texテンプレート2026" / "tmplate.tex"
+TEMPLATE_DOCUMENT = ROOT_DIR / "Texテンプレート2026" / "tmplate.tex"
+MINUTES_DIR = TEMPLATE_DOCUMENT.parent
 AUTO_START = "% AUTO-TRANSCRIPT-START"
 AUTO_END = "% AUTO-TRANSCRIPT-END"
 AUTO_HEADER_LINES = [
@@ -354,6 +355,24 @@ def ensure_auto_block(text: str) -> str:
     if end_document in text:
         return text.replace(end_document, block + end_document, 1)
     return text.rstrip() + "\n\n" + block
+
+
+def daily_document_path() -> Path:
+    date_label = env_value("MEETING_MINUTES_DATE") or datetime.now().strftime("%Y%m%d")
+    if not re.fullmatch(r"\d{8}", date_label):
+        raise RuntimeError("MEETING_MINUTES_DATE must be in YYYYMMDD format.")
+    return MINUTES_DIR / f"tmplate_minutes{date_label}.tex"
+
+
+def prepare_daily_document(document_path: Path) -> tuple[str, str]:
+    if document_path.exists():
+        text, encoding = read_text_with_encoding(document_path)
+        return ensure_auto_block(text), encoding
+
+    template_text, encoding = read_text_with_encoding(TEMPLATE_DOCUMENT)
+    text = ensure_auto_block(template_text)
+    document_path.write_text(text, encoding=encoding)
+    return text, encoding
 
 
 def split_auto_block(text: str) -> tuple[str, str, str]:
@@ -741,7 +760,7 @@ class RecordingController:
 
 @dataclass
 class MeetingAppState:
-    document_path: Path = DEFAULT_DOCUMENT
+    document_path: Path = field(default_factory=daily_document_path)
     document_encoding: str = field(default="utf-8")
     document_text: str = field(default="")
     document_version: int = field(default=0)
@@ -765,8 +784,8 @@ class MeetingAppState:
     def __post_init__(self) -> None:
         self.lock = threading.RLock()
         self.controller: RecordingController | None = None
-        text, encoding = read_text_with_encoding(self.document_path)
-        self.document_text = ensure_auto_block(text)
+        text, encoding = prepare_daily_document(self.document_path)
+        self.document_text = text
         self.document_encoding = encoding
         self.document_version = 1
 

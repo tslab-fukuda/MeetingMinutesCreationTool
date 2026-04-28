@@ -175,11 +175,23 @@ http://127.0.0.1:8000
 - `publish_pr.bat`
   - 変更のコミット、push、Pull Request 作成をまとめて行う補助バッチ
 - `Texテンプレート2026/tmplate.tex`
-  - 編集対象の議事録テンプレート
+  - 元になる議事録テンプレート。Web アプリから直接書き換えません。
+- `Texテンプレート2026/tmplate_minutesYYYYMMDD.tex`
+  - Web アプリが日付ごとに作成・編集する議事録ファイル
 
 ## 録音・文字起こしツール単体の使い方
 
 詳しくは [RECORDING.md](./RECORDING.md) を参照してください。
+
+## Web アプリの議事録ファイル
+
+Web アプリは `Texテンプレート2026/tmplate.tex` を元テンプレートとして読み込み、起動日の `Texテンプレート2026/tmplate_minutesYYYYMMDD.tex` を作成して編集します。
+
+補足:
+
+- `tmplate.tex` には自動文字起こしログを書き込みません。
+- 日付を固定したい場合は `local_settings.env` に `MEETING_MINUTES_DATE=20260428` のように指定できます。
+- 生成された PDF や LaTeX の中間ファイルは `.gitignore` で除外されるため、Git にコミットしません。
 
 ## OpenAI API キー
 
