@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Meeting Minutes UI</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260428-llm-selector" />
+    <link rel="stylesheet" href="/static/app.css?v=20260428-agenda-insert" />
   </head>
   <body>
     <div class="app-shell">
@@ -26,6 +26,9 @@
           <button id="stop-button" class="danger">停止</button>
           <button id="save-button">TeX保存</button>
           <button id="compile-button">TeX再コンパイル</button>
+          <button id="target-current-button">カーソル位置を挿入先</button>
+          <button id="reflect-summary-button">要約を反映</button>
+          <button id="next-target-button">次項目へ</button>
           <label class="toggle">
             <input id="auto-reflect-toggle" type="checkbox" checked />
             <span>自動反映</span>
@@ -41,6 +44,7 @@
         <div class="status-item"><span>経過</span><strong id="elapsed">00:00:00</strong></div>
         <div class="status-item"><span>録音先</span><strong id="recording-path">-</strong></div>
         <div class="status-item"><span>文字起こし</span><strong id="transcript-path">-</strong></div>
+        <div class="status-item"><span>挿入先</span><strong id="agenda-target">-</strong></div>
         <div class="status-item warning" id="warning-text">警告なし</div>
       </section>
 
@@ -73,6 +77,6 @@
         </div>
       </section>
     </div>
-    <script src="/static/app.js?v=20260428-llm-selector"></script>
+    <script src="/static/app.js?v=20260428-agenda-insert"></script>
   </body>
   </html>

@@ -48,6 +48,10 @@ AUTO_HEADER_LINES = [
 ]
 AUTO_FOOTER_LINES = [r"\end{itemize}"]
 AUTO_EMPTY_ITEM = r"\item[]"
+ITEM_LINE_RE = re.compile(
+    r"^(?P<indent>[ \t]*)\\item(?P<option>\s*\[[^\]]*\])?(?P<body>[^\n]*)",
+    re.MULTILINE,
+)
 
 load_local_settings(ROOT_DIR)
 
@@ -440,6 +444,165 @@ def append_transcript_entry(tex_text: str, entry_id: int, time_label: str, trans
     return merged
 
 
+@dataclass(frozen=True)
+class AgendaItemTarget:
+    index: int
+    start: int
+    end: int
+    indent: str
+    body: str
+    empty: bool
+
+
+def is_position_in_auto_block(text: str, position: int) -> bool:
+    start = text.find(AUTO_START)
+    end = text.find(AUTO_END)
+    return start != -1 and end != -1 and start <= position <= end + len(AUTO_END)
+
+
+def agenda_item_targets(tex_text: str) -> list[AgendaItemTarget]:
+    targets: list[AgendaItemTarget] = []
+    for match in ITEM_LINE_RE.finditer(tex_text):
+        if is_position_in_auto_block(tex_text, match.start()):
+            continue
+        line_end = tex_text.find("\n", match.start())
+        if line_end == -1:
+            line_end = len(tex_text)
+        body = match.group("body").strip()
+        targets.append(
+            AgendaItemTarget(
+                index=len(targets),
+                start=match.start(),
+                end=line_end,
+                indent=match.group("indent"),
+                body=body,
+                empty=body == "",
+            )
+        )
+    return targets
+
+
+def clamp_agenda_target_index(tex_text: str, target_index: int) -> int:
+    targets = agenda_item_targets(tex_text)
+    if not targets:
+        return 0
+    return max(0, min(target_index, len(targets) - 1))
+
+
+def first_empty_agenda_target_index(tex_text: str) -> int:
+    targets = agenda_item_targets(tex_text)
+    for target in targets:
+        if target.empty:
+            return target.index
+    return 0
+
+
+def agenda_target_index_from_cursor(tex_text: str, cursor: int | None) -> int:
+    targets = agenda_item_targets(tex_text)
+    if not targets:
+        return 0
+    if cursor is None:
+        return first_empty_agenda_target_index(tex_text)
+
+    cursor = max(0, min(cursor, len(tex_text)))
+    containing = 0
+    for target in targets:
+        if target.start <= cursor <= target.end:
+            containing = target.index
+            break
+        if target.start < cursor:
+            containing = target.index
+
+    for target in targets:
+        if target.start >= cursor and target.empty:
+            return target.index
+    return containing
+
+
+def next_empty_agenda_target_index(tex_text: str, current_index: int) -> int:
+    targets = agenda_item_targets(tex_text)
+    if not targets:
+        return 0
+    for target in targets:
+        if target.index > current_index and target.empty:
+            return target.index
+    return min(current_index + 1, len(targets) - 1)
+
+
+def agenda_target_snapshot(tex_text: str, target_index: int) -> dict[str, Any]:
+    targets = agenda_item_targets(tex_text)
+    if not targets:
+        return {
+            "index": 0,
+            "count": 0,
+            "preview": "挿入できる \\item がありません",
+            "empty": False,
+        }
+    safe_index = clamp_agenda_target_index(tex_text, target_index)
+    target = targets[safe_index]
+    preview = target.body or "(空の項目)"
+    return {
+        "index": safe_index,
+        "count": len(targets),
+        "preview": preview[:80],
+        "empty": target.empty,
+    }
+
+
+def insert_agenda_summary(
+    tex_text: str,
+    target_index: int,
+    summary: str,
+    *,
+    replace_non_empty: bool = False,
+) -> tuple[str, int]:
+    targets = agenda_item_targets(tex_text)
+    if not targets:
+        raise RuntimeError("No \\item target was found in the TeX document.")
+
+    safe_index = max(0, min(target_index, len(targets) - 1))
+    target = targets[safe_index]
+    line = f"{target.indent}\\item {escape_tex(summary)}"
+    if target.empty or replace_non_empty:
+        updated = tex_text[: target.start] + line + tex_text[target.end :]
+        return updated, safe_index
+    updated = tex_text[: target.end] + "\n" + line + tex_text[target.end :]
+    return updated, safe_index + 1
+
+
+def transcript_has_minutes_content(text: str) -> bool:
+    normalized = text.strip()
+    if not normalized:
+        return False
+    lowered = normalized.casefold()
+    return lowered not in {"none", "(no speech)", "no speech"} and not lowered.startswith(
+        "[transcription failed:"
+    )
+
+
+def compact_transcript_text(text: str, limit: int = 180) -> str:
+    compacted = re.sub(r"\s+", " ", text).strip()
+    if len(compacted) <= limit:
+        return compacted
+    return compacted[: limit - 1].rstrip() + "…"
+
+
+def summarize_minutes_item(provider_id: str, transcript: str) -> str:
+    system = (
+        "あなたは日本語の会議議事録作成アシスタントです。"
+        "発話の内容を、議事録の itemize に入れる1項目として簡潔に要約してください。"
+        "出力は本文だけにし、箇条書き記号、Markdown、LaTeXコマンドは付けないでください。"
+    )
+    prompt = (
+        "次の会話文を、議事録にそのまま入れられる短い日本語文に要約してください。"
+        "決定事項、依頼事項、継続審議、担当者が分かる場合は優先してください。\n\n"
+        f"{transcript}"
+    )
+    summary = call_llm(provider_id, prompt, system)
+    summary = re.sub(r"^\s*[-・*]\s*", "", summary).strip()
+    return summary or compact_transcript_text(transcript)
+
+
 def merge_document_with_server(submitted_text: str, current_text: str) -> str:
     submitted = ensure_auto_block(submitted_text)
     current = ensure_auto_block(current_text)
@@ -775,6 +938,9 @@ class MeetingAppState:
     status_warning: str = field(default="")
     transcript_entries: list[TranscriptEntry] = field(default_factory=list)
     auto_reflect: bool = field(default=True)
+    agenda_target_index: int = field(default=0)
+    agenda_target_generated: bool = field(default=False)
+    agenda_buffer: list[str] = field(default_factory=list)
     logs: list[str] = field(default_factory=list)
     compile_log: str = field(default="")
     compile_ok: bool | None = field(default=None)
@@ -787,6 +953,7 @@ class MeetingAppState:
         text, encoding = prepare_daily_document(self.document_path)
         self.document_text = text
         self.document_encoding = encoding
+        self.agenda_target_index = first_empty_agenda_target_index(self.document_text)
         self.document_version = 1
 
     def add_log(self, message: str) -> None:
@@ -798,6 +965,10 @@ class MeetingAppState:
     def _write_document(self, text: str) -> None:
         self.document_path.write_text(text, encoding=self.document_encoding)
         self.document_text = text
+        self.agenda_target_index = clamp_agenda_target_index(
+            self.document_text,
+            self.agenda_target_index,
+        )
         self.document_version += 1
 
     def get_document(self) -> dict[str, Any]:
@@ -823,6 +994,62 @@ class MeetingAppState:
             self.auto_reflect = enabled
         self.add_log(f"auto-reflect={'on' if enabled else 'off'}")
 
+    def set_agenda_target_from_cursor(self, cursor: int | None) -> dict[str, Any]:
+        with self.lock:
+            self.agenda_target_index = agenda_target_index_from_cursor(
+                self.document_text,
+                cursor,
+            )
+            self.agenda_target_generated = False
+            self.agenda_buffer = []
+            snapshot = agenda_target_snapshot(self.document_text, self.agenda_target_index)
+        self.add_log(f"agenda target set to {snapshot['index'] + 1}/{snapshot['count']}")
+        return {"ok": True, "agenda_target": snapshot}
+
+    def move_to_next_agenda_target(self) -> dict[str, Any]:
+        with self.lock:
+            self.agenda_target_index = next_empty_agenda_target_index(
+                self.document_text,
+                self.agenda_target_index,
+            )
+            self.agenda_target_generated = False
+            self.agenda_buffer = []
+            snapshot = agenda_target_snapshot(self.document_text, self.agenda_target_index)
+        self.add_log(f"agenda target moved to {snapshot['index'] + 1}/{snapshot['count']}")
+        return {"ok": True, "agenda_target": snapshot}
+
+    def reflect_current_agenda_summary(self) -> dict[str, Any]:
+        with self.lock:
+            transcript = "\n".join(self.agenda_buffer).strip()
+            provider_id = self.llm_provider
+        if not transcript:
+            return {"ok": False, "detail": "No transcript is available for the current agenda item."}
+
+        try:
+            summary = summarize_minutes_item(provider_id, transcript)
+        except Exception as exc:
+            self.add_log(f"summary failed: {exc}")
+            summary = compact_transcript_text(transcript)
+
+        with self.lock:
+            updated_text, target_index = insert_agenda_summary(
+                self.document_text,
+                self.agenda_target_index,
+                summary,
+                replace_non_empty=self.agenda_target_generated,
+            )
+            self.agenda_target_index = target_index
+            self.agenda_target_generated = True
+            self._write_document(updated_text)
+            snapshot = agenda_target_snapshot(self.document_text, self.agenda_target_index)
+        self.add_log("agenda summary reflected")
+        return {
+            "ok": True,
+            "summary": summary,
+            "agenda_target": snapshot,
+            "version": self.document_version,
+        }
+
     def on_recording_started(
         self,
         recording_path: Path,
@@ -840,6 +1067,7 @@ class MeetingAppState:
             self.file_size_mb = 0.0
             self.status_warning = ""
             self.transcript_entries = []
+            self.agenda_buffer = []
         self.add_log("recording started")
 
     def on_status(
@@ -856,17 +1084,14 @@ class MeetingAppState:
             self.status_warning = warning
 
     def on_transcript(self, entry: TranscriptEntry) -> None:
+        should_reflect = False
         with self.lock:
             self.transcript_entries.append(entry)
-            if self.auto_reflect:
-                time_label = format_hms(entry.start_sec)
-                updated_text = append_transcript_entry(
-                    self.document_text,
-                    entry.index,
-                    time_label,
-                    entry.text or "(no speech)",
-                )
-                self._write_document(updated_text)
+            if transcript_has_minutes_content(entry.text):
+                self.agenda_buffer.append(entry.text.strip())
+                should_reflect = self.auto_reflect
+        if should_reflect:
+            self.reflect_current_agenda_summary()
         self.add_log(f"transcript segment {entry.index:03d} received")
 
     def on_recording_finished(self, duration: float) -> None:
@@ -1018,6 +1243,11 @@ class MeetingAppState:
                 "auto_reflect": self.auto_reflect,
                 "document_path": str(self.document_path.relative_to(ROOT_DIR)),
                 "document_version": self.document_version,
+                "agenda_target": agenda_target_snapshot(
+                    self.document_text,
+                    self.agenda_target_index,
+                ),
+                "agenda_buffer_segments": len(self.agenda_buffer),
                 "transcript_entries": [
                     {
                         "index": entry.index,
@@ -1052,6 +1282,10 @@ class SaveDocumentRequest(BaseModel):
 
 class AutoReflectRequest(BaseModel):
     enabled: bool
+
+
+class AgendaTargetRequest(BaseModel):
+    cursor: int | None = None
 
 
 class LlmProviderRequest(BaseModel):
@@ -1118,6 +1352,24 @@ def stop_recording() -> dict[str, Any]:
 def set_auto_reflect(request: AutoReflectRequest) -> dict[str, Any]:
     manager.set_auto_reflect(request.enabled)
     return {"ok": True}
+
+
+@app.post("/api/agenda/target")
+def set_agenda_target(request: AgendaTargetRequest) -> dict[str, Any]:
+    return manager.set_agenda_target_from_cursor(request.cursor)
+
+
+@app.post("/api/agenda/next")
+def move_to_next_agenda_target() -> dict[str, Any]:
+    return manager.move_to_next_agenda_target()
+
+
+@app.post("/api/agenda/reflect")
+def reflect_agenda_summary() -> dict[str, Any]:
+    try:
+        return manager.reflect_current_agenda_summary()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/compile")
