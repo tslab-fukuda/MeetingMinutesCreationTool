@@ -109,6 +109,10 @@ async function loadDevices() {
   }
 }
 
+function appendClientLog(message) {
+  logOutput.textContent += `${logOutput.textContent ? "\n" : ""}${message}`;
+}
+
 function selectedApiProvider() {
   const [mode, provider] = transcriberSelect.value.split(":");
   if (mode !== "api") {
@@ -229,14 +233,34 @@ transcriberSelect.addEventListener("change", async () => {
 });
 
 async function boot() {
-  await loadDevices();
-  await refreshDocument(true);
-  await refreshStatus();
+  try {
+    await refreshDocument(true);
+  } catch (error) {
+    appendClientLog(`document load failed: ${error.message}`);
+  }
+
+  try {
+    await loadDevices();
+  } catch (error) {
+    deviceSelect.innerHTML = "";
+    const defaultOption = document.createElement("option");
+    defaultOption.value = "";
+    defaultOption.textContent = "Default Input Device";
+    deviceSelect.appendChild(defaultOption);
+    appendClientLog(`device load failed: ${error.message}`);
+  }
+
+  try {
+    await refreshStatus();
+  } catch (error) {
+    appendClientLog(`status failed: ${error.message}`);
+  }
+
   state.pollHandle = setInterval(async () => {
     try {
       await refreshStatus();
     } catch (error) {
-      logOutput.textContent += `\nstatus failed: ${error.message}`;
+      appendClientLog(`status failed: ${error.message}`);
     }
   }, 2000);
 }
