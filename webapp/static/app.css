@@ -79,10 +79,6 @@ select {
   font: inherit;
 }
 
-select[hidden] {
-  display: none;
-}
-
 button {
   cursor: pointer;
 }

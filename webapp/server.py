@@ -141,7 +141,7 @@ def llm_provider_configs() -> dict[str, dict[str, Any]]:
             "label": "ChatGPT",
             "base_url": None,
             "model": env_value("OPENAI_LLM_MODEL") or "gpt-4o-mini",
-            "api_key": env_value("OPENAI_API_KEY"),
+            "api_key": env_value("OPENAI_API_KEY") or (load_api_key() or ""),
             "required": ["OPENAI_API_KEY"],
         },
         "local": {
@@ -165,7 +165,7 @@ def provider_snapshot(provider: dict[str, Any]) -> dict[str, Any]:
         if not (
             first_env_value(*key)
             if isinstance(key, tuple)
-            else env_value(key)
+            else (provider.get("api_key") if key == "OPENAI_API_KEY" else env_value(key))
         )
     ]
     return {
@@ -218,6 +218,19 @@ def call_llm(provider_id: str, prompt: str, system: str | None = None) -> str:
         messages=messages,
     )
     return str(response.choices[0].message.content or "").strip()
+
+
+def api_provider_from_transcriber_mode(transcriber_mode: str) -> str | None:
+    if transcriber_mode == "api":
+        return "openai"
+    if transcriber_mode.startswith("api:"):
+        provider_id = transcriber_mode.split(":", 1)[1].strip()
+        return provider_id or "openai"
+    return None
+
+
+def local_transcription_model(provider: dict[str, Any]) -> str:
+    return first_env_value("LOCAL_TRANSCRIBE_MODEL", "LOCAL_LLM_MODEL", "MODEL") or provider["model"]
 
 
 def escape_tex(text: str) -> str:
@@ -457,16 +470,28 @@ class LocalTranscriber:
 
 
 class ApiTranscriber:
-    def __init__(self, model_name: str, language: str | None, prompt: str | None) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        language: str | None,
+        prompt: str | None,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        missing_message: str = "OPENAI_API_KEY is not set.",
+    ) -> None:
         if OpenAI is None:
             raise RuntimeError(
                 "API transcription requires the openai package. "
                 "Run 'python -m pip install openai'."
             )
-        api_key = load_api_key()
+        api_key = (api_key or load_api_key() or "").strip()
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set.")
-        self.client = OpenAI(api_key=api_key)
+            raise RuntimeError(missing_message)
+        client_kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self.client = OpenAI(**client_kwargs)
         self.model_name = model_name
         self.language = language
         self.prompt = prompt
@@ -546,7 +571,28 @@ class RecordingController:
             return None
         if transcriber_mode == "local":
             return LocalTranscriber(local_model, language, prompt)
-        return ApiTranscriber(api_model, language, prompt)
+        api_provider = api_provider_from_transcriber_mode(transcriber_mode)
+        if api_provider == "openai":
+            model_name = env_value("OPENAI_TRANSCRIBE_MODEL") or api_model
+            return ApiTranscriber(model_name, language, prompt)
+        if api_provider:
+            providers = llm_provider_configs()
+            provider = providers.get(api_provider)
+            if provider is None:
+                raise RuntimeError(f"Unknown API provider: {api_provider}")
+            snapshot = provider_snapshot(provider)
+            if not snapshot["configured"]:
+                missing = ", ".join(snapshot["missing"])
+                raise RuntimeError(f"API provider '{api_provider}' is not configured: {missing}")
+            return ApiTranscriber(
+                local_transcription_model(provider),
+                language,
+                prompt,
+                api_key=provider["api_key"],
+                base_url=provider["base_url"],
+                missing_message=f"API provider '{api_provider}' is not configured.",
+            )
+        raise RuntimeError(f"Unknown transcriber mode: {transcriber_mode}")
 
     def start(self) -> None:
         self.thread.start()
@@ -824,6 +870,9 @@ class MeetingAppState:
             if self.recording_active:
                 raise RuntimeError("Recording is already active.")
             self.auto_reflect = auto_reflect
+        api_provider = api_provider_from_transcriber_mode(transcriber_mode)
+        if api_provider:
+            self.set_llm_provider(api_provider)
 
         controller = RecordingController(
             self,

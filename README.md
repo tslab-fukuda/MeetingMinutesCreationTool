@@ -205,13 +205,14 @@ $env:OPENAI_API_KEY="your_api_key_here"
 
 ## LLM 設定
 
-Web アプリでは、文字起こし方式で `OpenAI API` を選んだ時だけ API の種類を選択できます。
+Web アプリでは、文字起こし方式の選択欄から `ChatGPT` または `ローカルLLM` を選んで API の種類を切り替えられます。
 
 OpenAI / ChatGPT API を使う場合:
 
 ```text
 OPENAI_API_KEY=your_api_key_here
 OPENAI_LLM_MODEL=gpt-4o-mini
+OPENAI_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe
 ```
 
 ローカル推論の OpenAI 互換 API を使う場合:
@@ -219,6 +220,7 @@ OPENAI_LLM_MODEL=gpt-4o-mini
 ```text
 LOCAL_LLM_BASE_URL=http://127.0.0.1:8000/v1
 LOCAL_LLM_MODEL=openai/gpt-oss-120b
+LOCAL_TRANSCRIBE_MODEL=openai/gpt-oss-120b
 LOCAL_LLM_API_KEY=your_local_api_key_here
 ```
 
@@ -247,6 +249,7 @@ LLM_PROVIDER=local
 - `local_settings.env` は `.gitignore` で除外されるため、API キーは Git に上がりません。
 - ローカル推論 API の `BASE_URL` は、OpenAI 互換エンドポイントの `/v1` まで含めて指定してください。
 - OpenAI API は Chat Completions 互換の形式で呼び出します。ローカル推論 API も同じ形式に対応している必要があります。
+- 録音の文字起こしで `ローカルLLM` を選ぶ場合は、ローカル推論 API が OpenAI 互換の Audio Transcriptions にも対応している必要があります。
 
 ## 依存パッケージ
 

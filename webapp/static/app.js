@@ -19,7 +19,6 @@ const logOutput = document.getElementById("log-output");
 const compileOutput = document.getElementById("compile-output");
 const deviceSelect = document.getElementById("device-select");
 const transcriberSelect = document.getElementById("transcriber-select");
-const llmProviderSelect = document.getElementById("llm-provider-select");
 const autoReflectToggle = document.getElementById("auto-reflect-toggle");
 const startButton = document.getElementById("start-button");
 const stopButton = document.getElementById("stop-button");
@@ -110,29 +109,23 @@ async function loadDevices() {
   }
 }
 
-async function loadLlmProviders() {
-  const data = await api("/api/llm/providers");
-  llmProviderSelect.innerHTML = "";
-
-  for (const provider of data.providers) {
-    const option = document.createElement("option");
-    option.value = provider.id;
-    option.disabled = !provider.configured;
-    const status = provider.configured ? "" : " [not configured]";
-    option.textContent = `${provider.label}: ${provider.model}${status}`;
-    llmProviderSelect.appendChild(option);
+function selectedApiProvider() {
+  const [mode, provider] = transcriberSelect.value.split(":");
+  if (mode !== "api") {
+    return null;
   }
-
-  if (data.selected) {
-    llmProviderSelect.value = data.selected;
-  }
-  updateLlmProviderVisibility();
+  return provider || "openai";
 }
 
-function updateLlmProviderVisibility() {
-  const apiSelected = transcriberSelect.value === "api";
-  llmProviderSelect.hidden = !apiSelected;
-  llmProviderSelect.disabled = !apiSelected;
+async function syncSelectedApiProvider() {
+  const provider = selectedApiProvider();
+  if (!provider) {
+    return;
+  }
+  await api("/api/llm/provider", {
+    method: "POST",
+    body: JSON.stringify({ provider }),
+  });
 }
 
 async function saveDocument() {
@@ -145,6 +138,7 @@ async function saveDocument() {
 }
 
 async function startRecording() {
+  await syncSelectedApiProvider();
   await api("/api/recording/start", {
     method: "POST",
     body: JSON.stringify({
@@ -226,23 +220,16 @@ autoReflectToggle.addEventListener("change", async () => {
   }
 });
 
-llmProviderSelect.addEventListener("change", async () => {
+transcriberSelect.addEventListener("change", async () => {
   try {
-    await api("/api/llm/provider", {
-      method: "POST",
-      body: JSON.stringify({ provider: llmProviderSelect.value }),
-    });
+    await syncSelectedApiProvider();
   } catch (error) {
     alert(error.message);
-    await loadLlmProviders();
   }
 });
 
-transcriberSelect.addEventListener("change", updateLlmProviderVisibility);
-
 async function boot() {
   await loadDevices();
-  await loadLlmProviders();
   await refreshDocument(true);
   await refreshStatus();
   state.pollHandle = setInterval(async () => {
