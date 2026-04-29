@@ -12,6 +12,8 @@ const recordingPath = document.getElementById("recording-path");
 const transcriptPath = document.getElementById("transcript-path");
 const transcriptList = document.getElementById("transcript-list");
 const transcriptCount = document.getElementById("transcript-count");
+const summaryTargetStatus = document.getElementById("summary-target-status");
+const summaryTargetDetail = document.getElementById("summary-target-detail");
 const warningText = document.getElementById("warning-text");
 const meterBar = document.getElementById("meter-bar");
 const documentPath = document.getElementById("document-path");
@@ -22,8 +24,10 @@ const transcriberSelect = document.getElementById("transcriber-select");
 const autoReflectToggle = document.getElementById("auto-reflect-toggle");
 const startButton = document.getElementById("start-button");
 const stopButton = document.getElementById("stop-button");
+const summaryButton = document.getElementById("summary-button");
 const saveButton = document.getElementById("save-button");
 const compileButton = document.getElementById("compile-button");
+const summaryButtonText = "報告事項へ要約反映";
 
 function formatHms(totalSeconds) {
   const total = Math.max(0, Math.floor(totalSeconds || 0));
@@ -88,6 +92,7 @@ async function refreshStatus() {
   if (!state.localDirty && data.document_version !== state.documentVersion) {
     await refreshDocument();
   }
+  await refreshReportSummaryTarget();
 }
 
 async function loadDevices() {
@@ -111,6 +116,52 @@ async function loadDevices() {
 
 function appendClientLog(message) {
   logOutput.textContent += `${logOutput.textContent ? "\n" : ""}${message}`;
+}
+
+function renderReportSummaryTarget(data) {
+  if (!data.ok) {
+    summaryTargetStatus.textContent = "挿入先未検出";
+    summaryTargetDetail.textContent = [
+      `ファイル: ${data.document_path || "-"}`,
+      `理由: ${data.reason || "不明"}`,
+      `文字起こし: ${data.transcript_entry_count || 0} segments / ${data.transcript_text_chars || 0}文字`,
+    ].join("\n");
+    return;
+  }
+
+  const modeText =
+    data.mode === "fill-empty-items" ? "既存の空欄へ入力" : "空欄がないため末尾へ追加";
+  summaryTargetStatus.textContent = `${data.line}行目 / ${modeText}`;
+  const targetLines = (data.target_lines || [])
+    .map((target) => `  - ${target.line}行目: ${target.preview || "\\item"}`)
+    .join("\n");
+  const detailLines = [
+    `ファイル: ${data.document_path}`,
+    `最初の入力先: ${data.line}行目 / ${modeText}`,
+    `説明: ${data.detail}`,
+    `目印行: ${data.preview || "(空行)"}`,
+    `報告事項行: ${data.report_line ? `${data.report_line}行目` : "報告事項内"}`,
+    `空の \\item 数: ${data.blank_item_count}`,
+    `文字起こし: ${data.transcript_entry_count} segments / ${data.transcript_text_chars}文字`,
+    `前回の自動要約項目数: ${data.report_summary_count}`,
+  ];
+  if (targetLines) {
+    detailLines.push(`入力予定の空欄:\n${targetLines}`);
+  }
+  if (!data.transcript_text_chars) {
+    detailLines.push("注意: 要約対象の文字起こしがまだありません。録音後に反映してください。");
+  }
+  summaryTargetDetail.textContent = detailLines.join("\n");
+}
+
+async function refreshReportSummaryTarget() {
+  try {
+    const data = await api("/api/report-summary/target");
+    renderReportSummaryTarget(data);
+  } catch (error) {
+    summaryTargetStatus.textContent = "確認失敗";
+    summaryTargetDetail.textContent = `挿入先の確認に失敗しました: ${error.message}`;
+  }
 }
 
 function selectedApiProvider() {
@@ -166,6 +217,26 @@ async function compileDocument() {
   compileOutput.textContent = result.log || "";
 }
 
+async function summarizeReportItems() {
+  await syncSelectedApiProvider();
+  if (state.localDirty) {
+    await saveDocument();
+  }
+  await refreshReportSummaryTarget();
+  const provider = selectedApiProvider();
+  const result = await api("/api/report-summary", {
+    method: "POST",
+    body: JSON.stringify(provider ? { provider } : {}),
+  });
+  appendClientLog(`report summary inserted: ${result.item_count} items`);
+  if (result.version) {
+    state.documentVersion = result.version;
+  }
+  await refreshDocument(true);
+  await refreshStatus();
+  await refreshReportSummaryTarget();
+}
+
 function scheduleSave() {
   clearTimeout(state.saveHandle);
   state.saveHandle = setTimeout(async () => {
@@ -195,6 +266,20 @@ stopButton.addEventListener("click", async () => {
     await stopRecording();
   } catch (error) {
     alert(error.message);
+  }
+});
+
+summaryButton.addEventListener("click", async () => {
+  summaryButton.disabled = true;
+  summaryButton.textContent = "要約中...";
+  try {
+    await summarizeReportItems();
+  } catch (error) {
+    appendClientLog(`report summary failed: ${error.message}`);
+    alert(error.message);
+  } finally {
+    summaryButton.disabled = false;
+    summaryButton.textContent = summaryButtonText;
   }
 });
 

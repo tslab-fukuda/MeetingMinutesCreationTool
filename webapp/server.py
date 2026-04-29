@@ -432,6 +432,245 @@ def append_transcript_entry(tex_text: str, entry_id: int, time_label: str, trans
     return merged
 
 
+def transcript_entries_to_text(entries: list["TranscriptEntry"]) -> str:
+    lines: list[str] = []
+    for entry in entries:
+        body = entry.text.strip()
+        if not body:
+            continue
+        lines.append(f"[{format_hms(entry.start_sec)}] {body}")
+    return "\n".join(lines).strip()
+
+
+def parse_report_summary_items(summary_text: str) -> list[str]:
+    items: list[str] = []
+    for raw_line in summary_text.splitlines():
+        line = raw_line.strip()
+        if not line or line in {"```", "```text"}:
+            continue
+        line = re.sub(r"^\s*(?:\\item|[-*・]|[0-9０-９]+[.)．、])\s*", "", line).strip()
+        line = line.strip("[]\"'` ")
+        if line:
+            items.append(line)
+
+    if items:
+        return items
+
+    fallback = re.sub(r"\s+", " ", summary_text).strip()
+    fallback = re.sub(r"^\s*(?:\\item|[-*・])\s*", "", fallback).strip()
+    return [fallback] if fallback else []
+
+
+def summarize_transcript_entries(provider_id: str, entries: list["TranscriptEntry"]) -> list[str]:
+    source_text = transcript_entries_to_text(entries)
+    if not source_text:
+        raise RuntimeError("No transcript text is available to summarize.")
+
+    system = (
+        "あなたは日本語の会議議事録作成アシスタントです。"
+        "ライブ文字起こしから、議事録TeXの報告事項に入れる短い日本語項目を作成してください。"
+    )
+    prompt = "\n".join(
+        [
+            "以下の文字起こしを、報告事項に入れる項目として簡潔に要約してください。",
+            "話題が変わる場合は項目を分け、必要な数だけ出力してください。",
+            "出力は1行1項目にしてください。",
+            "番号、箇条書き記号、Markdown、LaTeXコマンドは付けないでください。",
+            "決定事項、依頼事項、担当者、期限が分かる場合は優先してください。",
+            "",
+            source_text,
+        ]
+    )
+    summary_text = call_llm(provider_id, prompt, system)
+    items = parse_report_summary_items(summary_text)
+    if not items:
+        raise RuntimeError("LLM returned no report summary items.")
+    return items
+
+
+def line_number_at(text: str, index: int) -> int:
+    safe_index = max(0, min(index, len(text)))
+    return text.count("\n", 0, safe_index) + 1
+
+
+def line_preview_at(text: str, index: int) -> str:
+    safe_index = max(0, min(index, len(text)))
+    line_start = text.rfind("\n", 0, safe_index) + 1
+    line_end = text.find("\n", safe_index)
+    if line_end == -1:
+        line_end = len(text)
+    return text[line_start:line_end].strip()
+
+
+def find_report_itemize_range(tex_text: str) -> dict[str, Any]:
+    report_match = re.search(r"\\item\s*\\textbf\{報告事項\}", tex_text)
+    if not report_match:
+        return {
+            "ok": False,
+            "reason": "Could not find the report section in the TeX document.",
+        }
+
+    next_section_match = re.search(r"\\item\s*\\textbf\{審議事項\}", tex_text[report_match.end() :])
+    search_end = (
+        report_match.end() + next_section_match.start()
+        if next_section_match
+        else len(tex_text)
+        )
+    begin_index = tex_text.find(r"\begin{itemize}", report_match.end(), search_end)
+    if begin_index == -1:
+        return {
+            "ok": False,
+            "reason": "Could not find the report itemize block in the TeX document.",
+            "report_line": line_number_at(tex_text, report_match.start()),
+        }
+
+    end_index = find_matching_itemize_end(tex_text, begin_index)
+    if end_index == -1 or end_index > search_end:
+        return {
+            "ok": False,
+            "reason": "Could not find the end of the report itemize block.",
+            "report_line": line_number_at(tex_text, report_match.start()),
+        }
+
+    return {
+        "ok": True,
+        "begin_index": begin_index,
+        "end_index": end_index,
+        "report_line": line_number_at(tex_text, report_match.start()),
+        "report_preview": line_preview_at(tex_text, report_match.start()),
+    }
+
+
+def find_blank_report_item_targets(tex_text: str) -> list[dict[str, Any]]:
+    report_range = find_report_itemize_range(tex_text)
+    if not report_range["ok"]:
+        return []
+
+    begin_index = int(report_range["begin_index"])
+    end_index = int(report_range["end_index"])
+    body = tex_text[begin_index:end_index]
+    targets: list[dict[str, Any]] = []
+    for match in re.finditer(r"(?m)^(?P<indent>[ \t]*)\\item[ \t]*$", body):
+        start = begin_index + match.start()
+        end = begin_index + match.end()
+        line_end = tex_text.find("\n", end)
+        if line_end == -1:
+            line_end = end
+        else:
+            line_end += 1
+        targets.append(
+            {
+                "start_index": start,
+                "end_index": end,
+                "line_end_index": line_end,
+                "line": line_number_at(tex_text, start),
+                "indent": match.group("indent"),
+                "preview": line_preview_at(tex_text, start),
+            }
+        )
+    return targets
+
+
+def describe_report_summary_target(tex_text: str) -> dict[str, Any]:
+    report_range = find_report_itemize_range(tex_text)
+    if not report_range["ok"]:
+        return report_range
+
+    blank_targets = find_blank_report_item_targets(tex_text)
+    target_lines = [
+        {
+            "line": target["line"],
+            "preview": target["preview"] or r"\item",
+        }
+        for target in blank_targets[:10]
+    ]
+    if blank_targets:
+        first_target = blank_targets[0]
+        return {
+            "ok": True,
+            "mode": "fill-empty-items",
+            "line": first_target["line"],
+            "detail": "報告事項内にある既存の空の \\item 行へ上から順に入力します。",
+            "preview": first_target["preview"] or r"\item",
+            "blank_item_count": len(blank_targets),
+            "target_lines": target_lines,
+            "report_line": report_range["report_line"],
+            "report_preview": report_range["report_preview"],
+        }
+
+    insert_index = tex_text.rfind("\n", 0, int(report_range["end_index"]))
+    insert_index = int(report_range["end_index"]) if insert_index == -1 else insert_index + 1
+    return {
+        "ok": True,
+        "mode": "append-items",
+        "line": line_number_at(tex_text, insert_index),
+        "detail": "報告事項内に空の \\item がないため、報告事項の末尾へ \\item を追加します。",
+        "preview": line_preview_at(tex_text, insert_index),
+        "blank_item_count": 0,
+        "target_lines": [],
+        "report_line": report_range["report_line"],
+        "report_preview": report_range["report_preview"],
+        "append_index": insert_index,
+    }
+
+
+def find_matching_itemize_end(tex_text: str, begin_index: int) -> int:
+    depth = 0
+    pattern = re.compile(r"\\(begin|end)\{itemize\}")
+    for match in pattern.finditer(tex_text, begin_index):
+        if match.group(1) == "begin":
+            depth += 1
+        else:
+            depth -= 1
+            if depth == 0:
+                return match.start()
+    return -1
+
+
+def insert_report_summary_items(tex_text: str, items: list[str]) -> str:
+    if not items:
+        raise RuntimeError("No report summary items were generated.")
+
+    target = describe_report_summary_target(tex_text)
+    if not target["ok"]:
+        raise RuntimeError(str(target["reason"]))
+
+    blank_targets = find_blank_report_item_targets(tex_text)
+    if blank_targets:
+        replacements: list[tuple[int, int, str]] = []
+        for item, blank_target in zip(items, blank_targets):
+            replacement = f"{blank_target['indent']}\\item {escape_tex(item)}"
+            replacements.append(
+                (
+                    int(blank_target["start_index"]),
+                    int(blank_target["end_index"]),
+                    replacement,
+                )
+            )
+
+        extra_items = items[len(blank_targets) :]
+        if extra_items:
+            last_target = blank_targets[min(len(items), len(blank_targets)) - 1]
+            extra_lines = [
+                f"{last_target['indent']}\\item {escape_tex(item)}" for item in extra_items
+            ]
+            insertion_index = int(last_target["line_end_index"])
+            replacements.append((insertion_index, insertion_index, "\n".join(extra_lines) + "\n"))
+
+        updated = tex_text
+        for start, end, replacement in sorted(replacements, reverse=True):
+            updated = updated[:start] + replacement + updated[end:]
+        return updated
+
+    report_range = find_report_itemize_range(tex_text)
+    if not report_range["ok"]:
+        raise RuntimeError(str(report_range["reason"]))
+    insert_index = tex_text.rfind("\n", 0, int(report_range["end_index"]))
+    insert_index = int(report_range["end_index"]) if insert_index == -1 else insert_index + 1
+    lines = [f"\t\t\\item {escape_tex(item)}" for item in items]
+    return tex_text[:insert_index] + "\n".join(lines) + "\n" + tex_text[insert_index:]
+
+
 def merge_document_with_server(submitted_text: str, base_text: str, current_text: str) -> str:
     submitted = ensure_auto_block(submitted_text)
     base = ensure_auto_block(base_text)
@@ -775,6 +1014,7 @@ class MeetingAppState:
     compile_ok: bool | None = field(default=None)
     pdf_path: str | None = field(default=None)
     llm_provider: str = field(default_factory=default_llm_provider)
+    report_summary_items: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.lock = threading.RLock()
@@ -846,6 +1086,7 @@ class MeetingAppState:
             self.file_size_mb = 0.0
             self.status_warning = ""
             self.transcript_entries = []
+            self.report_summary_items = []
         self.add_log("recording started")
 
     def on_status(
@@ -970,6 +1211,42 @@ class MeetingAppState:
             "pdf_path": self.pdf_path,
         }
 
+    def summarize_report_items(self, provider: str | None = None) -> dict[str, Any]:
+        with self.lock:
+            entries = list(self.transcript_entries)
+            provider_id = provider or self.llm_provider
+
+        items = summarize_transcript_entries(provider_id, entries)
+        with self.lock:
+            updated_text = insert_report_summary_items(self.document_text, items)
+            self._write_document(updated_text)
+            self.report_summary_items = items
+            version = self.document_version
+        self.add_log(f"report summary inserted items={len(items)} provider={provider_id}")
+        return {
+            "ok": True,
+            "provider": provider_id,
+            "item_count": len(items),
+            "items": items,
+            "version": version,
+        }
+
+    def report_summary_target_snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            target = describe_report_summary_target(self.document_text)
+            entries = list(self.transcript_entries)
+            document_path = str(self.document_path.relative_to(ROOT_DIR))
+            summary_count = len(self.report_summary_items)
+
+        transcript_text = transcript_entries_to_text(entries)
+        return {
+            "document_path": document_path,
+            "transcript_entry_count": len(entries),
+            "transcript_text_chars": len(transcript_text),
+            "report_summary_count": summary_count,
+            **target,
+        }
+
     def llm_provider_snapshot(self) -> dict[str, Any]:
         with self.lock:
             selected = self.llm_provider
@@ -1039,6 +1316,7 @@ class MeetingAppState:
                 "compile_log": self.compile_log,
                 "pdf_path": self.pdf_path,
                 "llm_provider": self.llm_provider,
+                "report_summary_count": len(self.report_summary_items),
             }
 
 
@@ -1068,6 +1346,10 @@ class LlmProviderRequest(BaseModel):
 class LlmChatRequest(BaseModel):
     prompt: str
     system: str | None = None
+    provider: str | None = None
+
+
+class ReportSummaryRequest(BaseModel):
     provider: str | None = None
 
 
@@ -1158,6 +1440,19 @@ def chat_with_llm(request: LlmChatRequest) -> dict[str, Any]:
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/report-summary")
+def summarize_report_items(request: ReportSummaryRequest) -> dict[str, Any]:
+    try:
+        return manager.summarize_report_items(provider=request.provider)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/report-summary/target")
+def get_report_summary_target() -> dict[str, Any]:
+    return manager.report_summary_target_snapshot()
 
 
 @app.get("/api/devices")

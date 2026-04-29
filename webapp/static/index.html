@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Meeting Minutes UI</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260428-llm-selector" />
+    <link rel="stylesheet" href="/static/app.css?v=20260429-report-target" />
   </head>
   <body>
     <div class="app-shell">
@@ -24,6 +24,7 @@
           <select id="llm-provider-select" hidden disabled></select>
           <button id="start-button" class="primary">録音開始</button>
           <button id="stop-button" class="danger">停止</button>
+          <button id="summary-button">報告事項へ要約反映</button>
           <button id="save-button">TeX保存</button>
           <button id="compile-button">TeX再コンパイル</button>
           <label class="toggle">
@@ -58,6 +59,13 @@
             <h2>ライブ文字起こし</h2>
             <span id="transcript-count">0 segments</span>
           </div>
+          <div class="summary-target-panel">
+            <div class="summary-target-header">
+              <strong>報告事項への挿入先</strong>
+              <span id="summary-target-status">確認中...</span>
+            </div>
+            <pre id="summary-target-detail">挿入先を確認しています。</pre>
+          </div>
           <div id="transcript-list" class="transcript-list"></div>
         </section>
       </main>
@@ -73,6 +81,6 @@
         </div>
       </section>
     </div>
-    <script src="/static/app.js?v=20260428-llm-selector"></script>
+    <script src="/static/app.js?v=20260429-report-target"></script>
   </body>
   </html>
