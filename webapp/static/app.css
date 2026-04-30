@@ -205,6 +205,18 @@ button.danger {
   font-size: 0.86rem;
 }
 
+.summary-section-row {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+#summary-section-select {
+  width: 100%;
+  padding: 9px 12px;
+}
+
 #summary-target-detail {
   margin: 0;
   padding: 10px 12px;

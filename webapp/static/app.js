@@ -3,6 +3,7 @@ const state = {
   localDirty: false,
   pollHandle: null,
   saveHandle: null,
+  summarySectionsKey: "",
 };
 
 const texEditor = document.getElementById("tex-editor");
@@ -14,6 +15,7 @@ const transcriptList = document.getElementById("transcript-list");
 const transcriptCount = document.getElementById("transcript-count");
 const summaryTargetStatus = document.getElementById("summary-target-status");
 const summaryTargetDetail = document.getElementById("summary-target-detail");
+const summarySectionSelect = document.getElementById("summary-section-select");
 const warningText = document.getElementById("warning-text");
 const meterBar = document.getElementById("meter-bar");
 const documentPath = document.getElementById("document-path");
@@ -22,12 +24,13 @@ const compileOutput = document.getElementById("compile-output");
 const deviceSelect = document.getElementById("device-select");
 const transcriberSelect = document.getElementById("transcriber-select");
 const autoReflectToggle = document.getElementById("auto-reflect-toggle");
+const autoSummaryToggle = document.getElementById("auto-summary-toggle");
 const startButton = document.getElementById("start-button");
 const stopButton = document.getElementById("stop-button");
 const summaryButton = document.getElementById("summary-button");
 const saveButton = document.getElementById("save-button");
 const compileButton = document.getElementById("compile-button");
-const summaryButtonText = "報告事項へ要約反映";
+const summaryButtonText = "選択セクションへ要約反映";
 
 function formatHms(totalSeconds) {
   const total = Math.max(0, Math.floor(totalSeconds || 0));
@@ -85,6 +88,7 @@ async function refreshStatus() {
   warningText.textContent = data.status_warning || "警告なし";
   meterBar.style.width = `${Math.min(100, (data.current_rms / 2500) * 100)}%`;
   autoReflectToggle.checked = data.auto_reflect;
+  autoSummaryToggle.checked = data.auto_summarize;
   renderTranscript(data.transcript_entries || []);
   logOutput.textContent = (data.logs || []).join("\n");
   compileOutput.textContent = data.compile_log || "";
@@ -118,7 +122,33 @@ function appendClientLog(message) {
   logOutput.textContent += `${logOutput.textContent ? "\n" : ""}${message}`;
 }
 
+function renderSummarySectionOptions(sections, selectedId) {
+  const optionKey = (sections || [])
+    .map((section) => `${section.id}:${section.label}:${section.line}`)
+    .join("|");
+  const previousValue = summarySectionSelect.value;
+  if (state.summarySectionsKey !== optionKey) {
+    summarySectionSelect.innerHTML = "";
+
+    for (const section of sections || []) {
+      const option = document.createElement("option");
+      option.value = section.id;
+      option.textContent = `${section.label} (${section.line}行目)`;
+      summarySectionSelect.appendChild(option);
+    }
+    state.summarySectionsKey = optionKey;
+  }
+
+  const nextValue = selectedId || previousValue;
+  if (nextValue) {
+    summarySectionSelect.value = nextValue;
+  }
+  summarySectionSelect.disabled = summarySectionSelect.options.length === 0;
+}
+
 function renderReportSummaryTarget(data) {
+  renderSummarySectionOptions(data.sections || [], data.section_id);
+
   if (!data.ok) {
     summaryTargetStatus.textContent = "挿入先未検出";
     summaryTargetDetail.textContent = [
@@ -131,20 +161,27 @@ function renderReportSummaryTarget(data) {
 
   const modeText =
     data.mode === "fill-empty-items" ? "既存の空欄へ入力" : "空欄がないため末尾へ追加";
-  summaryTargetStatus.textContent = `${data.line}行目 / ${modeText}`;
+  const statusText = data.summary_status ? ` / ${data.summary_status}` : "";
+  summaryTargetStatus.textContent = `${data.section_label} / ${data.line}行目 / ${modeText}${statusText}`;
   const targetLines = (data.target_lines || [])
     .map((target) => `  - ${target.line}行目: ${target.preview || "\\item"}`)
     .join("\n");
   const detailLines = [
     `ファイル: ${data.document_path}`,
+    `選択セクション: ${data.section_label}`,
+    `セクション行: ${data.section_line ? `${data.section_line}行目` : "-"}`,
     `最初の入力先: ${data.line}行目 / ${modeText}`,
     `説明: ${data.detail}`,
     `目印行: ${data.preview || "(空行)"}`,
-    `報告事項行: ${data.report_line ? `${data.report_line}行目` : "報告事項内"}`,
     `空の \\item 数: ${data.blank_item_count}`,
     `文字起こし: ${data.transcript_entry_count} segments / ${data.transcript_text_chars}文字`,
-    `前回の自動要約項目数: ${data.report_summary_count}`,
+    `選択セクションの自動要約項目数: ${data.report_summary_count}`,
+    `即時要約: ${data.auto_summarize ? "ON" : "OFF"} / 状態: ${data.summary_status || "-"}`,
+    `要約済みsegment: ${data.last_summarized_segment || 0}`,
   ];
+  if (data.summary_error) {
+    detailLines.push(`要約エラー: ${data.summary_error}`);
+  }
   if (targetLines) {
     detailLines.push(`入力予定の空欄:\n${targetLines}`);
   }
@@ -201,6 +238,7 @@ async function startRecording() {
       device: deviceSelect.value === "" ? null : Number(deviceSelect.value),
       transcriber: transcriberSelect.value,
       auto_reflect: autoReflectToggle.checked,
+      auto_summarize: autoSummaryToggle.checked,
       language: "ja",
     }),
   });
@@ -305,6 +343,30 @@ autoReflectToggle.addEventListener("change", async () => {
       method: "POST",
       body: JSON.stringify({ enabled: autoReflectToggle.checked }),
     });
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
+autoSummaryToggle.addEventListener("change", async () => {
+  try {
+    await api("/api/auto-summary", {
+      method: "POST",
+      body: JSON.stringify({ enabled: autoSummaryToggle.checked }),
+    });
+    await refreshReportSummaryTarget();
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
+summarySectionSelect.addEventListener("change", async () => {
+  try {
+    await api("/api/report-summary/section", {
+      method: "POST",
+      body: JSON.stringify({ section_id: summarySectionSelect.value }),
+    });
+    await refreshReportSummaryTarget();
   } catch (error) {
     alert(error.message);
   }
