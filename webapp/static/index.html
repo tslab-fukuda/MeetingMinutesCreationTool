@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Meeting Minutes UI</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260428-llm-selector" />
+    <link rel="stylesheet" href="/static/app.css?v=20260430-section-summary" />
   </head>
   <body>
     <div class="app-shell">
@@ -24,11 +24,16 @@
           <select id="llm-provider-select" hidden disabled></select>
           <button id="start-button" class="primary">録音開始</button>
           <button id="stop-button" class="danger">停止</button>
+          <button id="summary-button">選択セクションへ要約反映</button>
           <button id="save-button">TeX保存</button>
           <button id="compile-button">TeX再コンパイル</button>
           <label class="toggle">
             <input id="auto-reflect-toggle" type="checkbox" checked />
             <span>自動反映</span>
+          </label>
+          <label class="toggle">
+            <input id="auto-summary-toggle" type="checkbox" checked />
+            <span>即時要約</span>
           </label>
         </div>
       </header>
@@ -58,6 +63,17 @@
             <h2>ライブ文字起こし</h2>
             <span id="transcript-count">0 segments</span>
           </div>
+          <div class="summary-target-panel">
+            <div class="summary-target-header">
+              <strong>選択セクションへの挿入先</strong>
+              <span id="summary-target-status">確認中...</span>
+            </div>
+            <label class="summary-section-row">
+              <span>挿入セクション</span>
+              <select id="summary-section-select"></select>
+            </label>
+            <pre id="summary-target-detail">挿入先を確認しています。</pre>
+          </div>
           <div id="transcript-list" class="transcript-list"></div>
         </section>
       </main>
@@ -73,6 +89,6 @@
         </div>
       </section>
     </div>
-    <script src="/static/app.js?v=20260428-llm-selector"></script>
+    <script src="/static/app.js?v=20260430-section-summary"></script>
   </body>
   </html>
