@@ -48,6 +48,8 @@ AUTO_HEADER_LINES = [
 ]
 AUTO_FOOTER_LINES = [r"\end{itemize}"]
 SUMMARY_CONTEXT_SEGMENTS = 6
+REPORT_SUMMARY_MAX_ITEM_CHARS = 70
+REPORT_SUMMARY_REFINE_THRESHOLD_CHARS = 90
 DEFAULT_SUMMARY_SECTION_TITLE = "報告事項"
 
 load_local_settings(ROOT_DIR)
@@ -463,6 +465,100 @@ def parse_report_summary_items(summary_text: str) -> list[str]:
     return [fallback] if fallback else []
 
 
+def normalize_report_summary_item(item: str) -> str:
+    normalized = re.sub(r"\s+", " ", item).strip(" 　")
+    normalized = normalized.strip("[]\"'` ")
+    normalized = re.sub(r"^[:：-]\s*", "", normalized)
+    return normalized
+
+
+def clean_report_summary_items(items: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = normalize_report_summary_item(item)
+        if not normalized:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        cleaned.append(normalized)
+    return cleaned
+
+
+def report_summary_needs_refinement(items: list[str]) -> bool:
+    example_markers = (
+        "例えば",
+        "たとえば",
+        "例えると",
+        "例として",
+        "みたいな",
+        "のようなイメージ",
+    )
+    for item in items:
+        if len(item) > REPORT_SUMMARY_REFINE_THRESHOLD_CHARS:
+            return True
+        if item.count("。") > 1:
+            return True
+        if item.count("、") >= 5:
+            return True
+        if any(marker in item for marker in example_markers):
+            return True
+    return False
+
+
+def report_summary_instruction_lines(target_label: str) -> list[str]:
+    return [
+        f"Write concise Japanese meeting-minutes items for the '{target_label}' section.",
+        "Keep only meeting-minutes-worthy content such as decisions, requests, open issues, owners, deadlines, and status changes.",
+        "Do not mirror the transcript wording or retell the conversation flow line by line.",
+        "Omit examples, analogies, metaphors, jokes, filler, repeated explanations, and side remarks unless they are themselves the conclusion.",
+        "If a long explanation leads to one conclusion, keep only that conclusion.",
+        f"Each item must be a single short Japanese sentence, preferably within {REPORT_SUMMARY_MAX_ITEM_CHARS} characters.",
+        "Output one item per line with no bullets, numbers, Markdown, or LaTeX commands.",
+    ]
+
+
+def refine_report_summary_items(
+    provider_id: str,
+    items: list[str],
+    target_label: str = DEFAULT_SUMMARY_SECTION_TITLE,
+) -> list[str]:
+    draft_text = "\n".join(f"- {item}" for item in items)
+    system = "You rewrite draft Japanese meeting-minutes items into concise final items."
+    prompt = "\n".join(
+        [
+            *report_summary_instruction_lines(target_label),
+            "Rewrite the following draft items.",
+            "If an item only contains an example or analogy and does not carry a decision, request, issue, or status change, drop it.",
+            "",
+            "[Draft items]",
+            draft_text,
+        ]
+    )
+    refined_text = call_llm(provider_id, prompt, system)
+    refined_items = clean_report_summary_items(parse_report_summary_items(refined_text))
+    if not refined_items:
+        raise RuntimeError("LLM returned no refined report summary items.")
+    return refined_items
+
+
+def finalize_report_summary_items(
+    provider_id: str,
+    items: list[str],
+    target_label: str = DEFAULT_SUMMARY_SECTION_TITLE,
+) -> list[str]:
+    cleaned = clean_report_summary_items(items)
+    if not cleaned:
+        raise RuntimeError("LLM returned no report summary items.")
+    if not report_summary_needs_refinement(cleaned):
+        return cleaned
+    try:
+        return refine_report_summary_items(provider_id, cleaned, target_label)
+    except Exception:
+        return cleaned
+
+
 def summarize_transcript_entries(
     provider_id: str,
     entries: list["TranscriptEntry"],
@@ -472,26 +568,19 @@ def summarize_transcript_entries(
     if not source_text:
         raise RuntimeError("No transcript text is available to summarize.")
 
-    system = (
-        "あなたは日本語の会議議事録作成アシスタントです。"
-        "ライブ文字起こしから、議事録TeXの選択中セクションに入れる短い日本語項目を作成してください。"
-    )
+    system = "You create concise Japanese meeting-minutes items from transcripts."
     prompt = "\n".join(
         [
-            f"以下の文字起こしを、議事録TeXの「{target_label}」に入れる項目として簡潔に要約してください。",
-            "話題が変わる場合は項目を分け、必要な数だけ出力してください。",
-            "出力は1行1項目にしてください。",
-            "番号、箇条書き記号、Markdown、LaTeXコマンドは付けないでください。",
-            "決定事項、依頼事項、担当者、期限が分かる場合は優先してください。",
+            *report_summary_instruction_lines(target_label),
+            "Summarize the transcript below into as few items as needed.",
+            "Group long explanations into higher-level takeaways instead of preserving spoken detail.",
             "",
             source_text,
         ]
     )
     summary_text = call_llm(provider_id, prompt, system)
     items = parse_report_summary_items(summary_text)
-    if not items:
-        raise RuntimeError("LLM returned no report summary items.")
-    return items
+    return finalize_report_summary_items(provider_id, items, target_label)
 
 
 def summarize_incremental_report_items(
@@ -507,19 +596,15 @@ def summarize_incremental_report_items(
 
     previous_text = "\n".join(f"- {item}" for item in previous_items) or "(まだありません)"
     recent_text = transcript_entries_to_text(recent_entries) or "(まだありません)"
-    system = (
-        "あなたは日本語の会議議事録作成アシスタントです。"
-        "15秒ごとの文字起こし断片を、前後の文脈と整合する議事録項目へ整理します。"
-    )
+    system = "You maintain concise Japanese meeting-minutes items from streaming transcript chunks."
     prompt = "\n".join(
         [
-            f"対象セクションは「{target_label}」です。",
-            "既存の項目候補と新しい文字起こしを統合し、更新後の項目候補を出力してください。",
-            "15秒区切りで文章が途中で切れるため、新しい断片が前の話題の続きなら既存項目を修正・統合してください。",
-            "話題が明確に変わった場合だけ、新しい項目を追加してください。",
-            "出力は更新後の全項目を1行1項目にしてください。",
-            "番号、箇条書き記号、Markdown、LaTeXコマンドは付けないでください。",
-            "決定事項、依頼事項、担当者、期限が分かる場合は優先してください。",
+            *report_summary_instruction_lines(target_label),
+            f"The target section is '{target_label}'.",
+            "Merge the existing draft items with the new transcript chunk and output the updated full item list.",
+            "Transcript chunks may end mid-sentence, so merge them into the existing item when the topic is continuing.",
+            "Add a new item only when the topic clearly changes.",
+            "Do not let chunk boundaries or spoken repetition leak into the final items.",
             "",
             "[現在の項目候補]",
             previous_text,
@@ -533,9 +618,7 @@ def summarize_incremental_report_items(
     )
     summary_text = call_llm(provider_id, prompt, system)
     items = parse_report_summary_items(summary_text)
-    if not items:
-        raise RuntimeError("LLM returned no report summary items.")
-    return items
+    return finalize_report_summary_items(provider_id, items, target_label)
 
 
 def line_number_at(text: str, index: int) -> int:
