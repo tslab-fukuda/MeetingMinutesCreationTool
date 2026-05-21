@@ -47,6 +47,10 @@ AUTO_HEADER_LINES = [
     r"\begin{itemize}",
 ]
 AUTO_FOOTER_LINES = [r"\end{itemize}"]
+SUMMARY_CONTEXT_SEGMENTS = 6
+REPORT_SUMMARY_MAX_ITEM_CHARS = 70
+REPORT_SUMMARY_REFINE_THRESHOLD_CHARS = 90
+DEFAULT_SUMMARY_SECTION_TITLE = "報告事項"
 
 load_local_settings(ROOT_DIR)
 
@@ -432,6 +436,582 @@ def append_transcript_entry(tex_text: str, entry_id: int, time_label: str, trans
     return merged
 
 
+def transcript_entries_to_text(entries: list["TranscriptEntry"]) -> str:
+    lines: list[str] = []
+    for entry in entries:
+        body = entry.text.strip()
+        if not body or not should_summarize_transcript(body):
+            continue
+        lines.append(f"[{format_hms(entry.start_sec)}] {body}")
+    return "\n".join(lines).strip()
+
+
+def parse_report_summary_items(summary_text: str) -> list[str]:
+    items: list[str] = []
+    for raw_line in summary_text.splitlines():
+        line = raw_line.strip()
+        if not line or line in {"```", "```text"}:
+            continue
+        line = re.sub(r"^\s*(?:\\item|[-*・]|[0-9０-９]+[.)．、])\s*", "", line).strip()
+        line = line.strip("[]\"'` ")
+        if line:
+            items.append(line)
+
+    if items:
+        return items
+
+    fallback = re.sub(r"\s+", " ", summary_text).strip()
+    fallback = re.sub(r"^\s*(?:\\item|[-*・])\s*", "", fallback).strip()
+    return [fallback] if fallback else []
+
+
+def normalize_report_summary_item(item: str) -> str:
+    normalized = re.sub(r"\s+", " ", item).strip(" 　")
+    normalized = normalized.strip("[]\"'` ")
+    normalized = re.sub(r"^[:：-]\s*", "", normalized)
+    return normalized
+
+
+def clean_report_summary_items(items: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = normalize_report_summary_item(item)
+        if not normalized:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        cleaned.append(normalized)
+    return cleaned
+
+
+def report_summary_needs_refinement(items: list[str]) -> bool:
+    example_markers = (
+        "例えば",
+        "たとえば",
+        "例えると",
+        "例として",
+        "みたいな",
+        "のようなイメージ",
+    )
+    for item in items:
+        if len(item) > REPORT_SUMMARY_REFINE_THRESHOLD_CHARS:
+            return True
+        if item.count("。") > 1:
+            return True
+        if item.count("、") >= 5:
+            return True
+        if any(marker in item for marker in example_markers):
+            return True
+    return False
+
+
+def report_summary_instruction_lines(target_label: str) -> list[str]:
+    return [
+        f"Write concise Japanese meeting-minutes items for the '{target_label}' section.",
+        "Keep only meeting-minutes-worthy content such as decisions, requests, open issues, owners, deadlines, and status changes.",
+        "Do not mirror the transcript wording or retell the conversation flow line by line.",
+        "Omit examples, analogies, metaphors, jokes, filler, repeated explanations, and side remarks unless they are themselves the conclusion.",
+        "If a long explanation leads to one conclusion, keep only that conclusion.",
+        f"Each item must be a single short Japanese sentence, preferably within {REPORT_SUMMARY_MAX_ITEM_CHARS} characters.",
+        "Output one item per line with no bullets, numbers, Markdown, or LaTeX commands.",
+    ]
+
+
+def refine_report_summary_items(
+    provider_id: str,
+    items: list[str],
+    target_label: str = DEFAULT_SUMMARY_SECTION_TITLE,
+) -> list[str]:
+    draft_text = "\n".join(f"- {item}" for item in items)
+    system = "You rewrite draft Japanese meeting-minutes items into concise final items."
+    prompt = "\n".join(
+        [
+            *report_summary_instruction_lines(target_label),
+            "Rewrite the following draft items.",
+            "If an item only contains an example or analogy and does not carry a decision, request, issue, or status change, drop it.",
+            "",
+            "[Draft items]",
+            draft_text,
+        ]
+    )
+    refined_text = call_llm(provider_id, prompt, system)
+    refined_items = clean_report_summary_items(parse_report_summary_items(refined_text))
+    if not refined_items:
+        raise RuntimeError("LLM returned no refined report summary items.")
+    return refined_items
+
+
+def finalize_report_summary_items(
+    provider_id: str,
+    items: list[str],
+    target_label: str = DEFAULT_SUMMARY_SECTION_TITLE,
+) -> list[str]:
+    cleaned = clean_report_summary_items(items)
+    if not cleaned:
+        raise RuntimeError("LLM returned no report summary items.")
+    if not report_summary_needs_refinement(cleaned):
+        return cleaned
+    try:
+        return refine_report_summary_items(provider_id, cleaned, target_label)
+    except Exception:
+        return cleaned
+
+
+def summarize_transcript_entries(
+    provider_id: str,
+    entries: list["TranscriptEntry"],
+    target_label: str = DEFAULT_SUMMARY_SECTION_TITLE,
+) -> list[str]:
+    source_text = transcript_entries_to_text(entries)
+    if not source_text:
+        raise RuntimeError("No transcript text is available to summarize.")
+
+    system = "You create concise Japanese meeting-minutes items from transcripts."
+    prompt = "\n".join(
+        [
+            *report_summary_instruction_lines(target_label),
+            "Summarize the transcript below into as few items as needed.",
+            "Group long explanations into higher-level takeaways instead of preserving spoken detail.",
+            "",
+            source_text,
+        ]
+    )
+    summary_text = call_llm(provider_id, prompt, system)
+    items = parse_report_summary_items(summary_text)
+    return finalize_report_summary_items(provider_id, items, target_label)
+
+
+def summarize_incremental_report_items(
+    provider_id: str,
+    previous_items: list[str],
+    recent_entries: list["TranscriptEntry"],
+    new_entries: list["TranscriptEntry"],
+    target_label: str = DEFAULT_SUMMARY_SECTION_TITLE,
+) -> list[str]:
+    source_text = transcript_entries_to_text(new_entries)
+    if not source_text:
+        raise RuntimeError("No new transcript text is available to summarize.")
+
+    previous_text = "\n".join(f"- {item}" for item in previous_items) or "(まだありません)"
+    recent_text = transcript_entries_to_text(recent_entries) or "(まだありません)"
+    system = "You maintain concise Japanese meeting-minutes items from streaming transcript chunks."
+    prompt = "\n".join(
+        [
+            *report_summary_instruction_lines(target_label),
+            f"The target section is '{target_label}'.",
+            "Merge the existing draft items with the new transcript chunk and output the updated full item list.",
+            "Transcript chunks may end mid-sentence, so merge them into the existing item when the topic is continuing.",
+            "Add a new item only when the topic clearly changes.",
+            "Do not let chunk boundaries or spoken repetition leak into the final items.",
+            "",
+            "[現在の項目候補]",
+            previous_text,
+            "",
+            "[直近の文字起こし文脈]",
+            recent_text,
+            "",
+            "[今回新しく追加された文字起こし]",
+            source_text,
+        ]
+    )
+    summary_text = call_llm(provider_id, prompt, system)
+    items = parse_report_summary_items(summary_text)
+    return finalize_report_summary_items(provider_id, items, target_label)
+
+
+def line_number_at(text: str, index: int) -> int:
+    safe_index = max(0, min(index, len(text)))
+    return text.count("\n", 0, safe_index) + 1
+
+
+def line_preview_at(text: str, index: int) -> str:
+    safe_index = max(0, min(index, len(text)))
+    line_start = text.rfind("\n", 0, safe_index) + 1
+    line_end = text.find("\n", safe_index)
+    if line_end == -1:
+        line_end = len(text)
+    return text[line_start:line_end].strip()
+
+
+def strip_tex_comment(line: str) -> str:
+    for index, char in enumerate(line):
+        if char == "%" and (index == 0 or line[index - 1] != "\\"):
+            return line[:index]
+    return line
+
+
+def clean_tex_section_title(raw_title: str) -> str:
+    text = strip_tex_comment(raw_title).strip()
+    text = re.sub(r"\\textbf\{([^{}]*)\}", r"\1", text)
+    text = re.sub(r"\\[a-zA-Z]+(?:\[[^\]]*\])?", "", text)
+    text = text.replace("{", "").replace("}", "")
+    text = text.replace("　", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def find_matching_list_end(tex_text: str, begin_index: int) -> int:
+    first_match = re.match(r"\\begin\{(itemize|enumerate)\}", tex_text[begin_index:])
+    if not first_match:
+        return -1
+
+    stack: list[str] = []
+    pattern = re.compile(r"\\(begin|end)\{(itemize|enumerate)\}")
+    for match in pattern.finditer(tex_text, begin_index):
+        action, env_name = match.group(1), match.group(2)
+        if action == "begin":
+            stack.append(env_name)
+            continue
+        if not stack:
+            return -1
+        if stack[-1] != env_name:
+            return -1
+        stack.pop()
+        if not stack:
+            return match.start()
+    return -1
+
+
+def find_next_list_begin(lines: list[str], offsets: list[int], line_index: int) -> int | None:
+    for next_index in range(line_index + 1, len(lines)):
+        content = strip_tex_comment(lines[next_index])
+        if not content.strip():
+            continue
+        begin_match = re.search(r"\\begin\{(itemize|enumerate)\}", content)
+        if begin_match and not content[: begin_match.start()].strip():
+            return offsets[next_index] + begin_match.start()
+        if re.match(r"^\s*\\(?:item|end)\b", content):
+            return None
+    return None
+
+
+def section_options_for_client(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": section["id"],
+            "title": section["title"],
+            "label": section["label"],
+            "line": section["line"],
+        }
+        for section in sections
+    ]
+
+
+def find_summary_target_sections(tex_text: str) -> list[dict[str, Any]]:
+    lines = tex_text.splitlines(keepends=True)
+    offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line)
+
+    sections: list[dict[str, Any]] = []
+    current_depth = 0
+    titles_by_depth: dict[int, str] = {}
+    item_pattern = re.compile(r"^\s*\\item(?:\[[^\]]*\])?\s*(?P<title>.*)$")
+    list_pattern = re.compile(r"\\(begin|end)\{(itemize|enumerate)\}")
+
+    for line_index, raw_line in enumerate(lines):
+        content = strip_tex_comment(raw_line).rstrip("\r\n")
+        item_match = item_pattern.match(content)
+        if item_match:
+            title = clean_tex_section_title(item_match.group("title"))
+            if title:
+                parents = [
+                    titles_by_depth[depth]
+                    for depth in sorted(titles_by_depth)
+                    if depth < current_depth
+                ]
+                begin_index = find_next_list_begin(lines, offsets, line_index)
+                end_index = (
+                    find_matching_list_end(tex_text, begin_index)
+                    if begin_index is not None
+                    else -1
+                )
+                if begin_index is not None and end_index != -1:
+                    label = " > ".join([*parents, title])
+                    section_id = f"section-{len(sections) + 1}"
+                    sections.append(
+                        {
+                            "id": section_id,
+                            "title": title,
+                            "label": label,
+                            "line": line_number_at(tex_text, offsets[line_index]),
+                            "preview": line_preview_at(tex_text, offsets[line_index]),
+                            "begin_index": begin_index,
+                            "end_index": end_index,
+                            "depth": current_depth,
+                        }
+                    )
+
+                titles_by_depth[current_depth] = title
+                for depth in [depth for depth in titles_by_depth if depth > current_depth]:
+                    del titles_by_depth[depth]
+
+        for list_match in list_pattern.finditer(content):
+            if list_match.group(1) == "begin":
+                if current_depth == 0:
+                    titles_by_depth.clear()
+                current_depth += 1
+            else:
+                current_depth = max(0, current_depth - 1)
+                for depth in [depth for depth in titles_by_depth if depth > current_depth]:
+                    del titles_by_depth[depth]
+
+    return sections
+
+
+def choose_summary_section(
+    sections: list[dict[str, Any]],
+    section_id: str | None,
+) -> dict[str, Any] | None:
+    if section_id:
+        for section in sections:
+            if section["id"] == section_id:
+                return section
+
+    for section in sections:
+        if section["title"] == DEFAULT_SUMMARY_SECTION_TITLE:
+            return section
+
+    for section in sections:
+        if section["label"].startswith(f"{DEFAULT_SUMMARY_SECTION_TITLE} >"):
+            return section
+
+    return sections[0] if sections else None
+
+
+def resolve_summary_section(tex_text: str, section_id: str | None = None) -> dict[str, Any]:
+    sections = find_summary_target_sections(tex_text)
+    section = choose_summary_section(sections, section_id)
+    if section is None:
+        return {
+            "ok": False,
+            "reason": "Could not find a selectable TeX section with a nested list.",
+            "sections": [],
+        }
+    return {
+        "ok": True,
+        "section": section,
+        "sections": sections,
+    }
+
+
+def find_blank_item_targets_in_section(
+    tex_text: str,
+    section: dict[str, Any],
+) -> list[dict[str, Any]]:
+    begin_index = int(section["begin_index"])
+    end_index = int(section["end_index"])
+    body = tex_text[begin_index:end_index]
+    targets: list[dict[str, Any]] = []
+    for match in re.finditer(r"(?m)^(?P<indent>[ \t]*)\\item[ \t]*$", body):
+        start = begin_index + match.start()
+        end = begin_index + match.end()
+        line_end = tex_text.find("\n", end)
+        if line_end == -1:
+            line_end = end
+        else:
+            line_end += 1
+        targets.append(
+            {
+                "start_index": start,
+                "end_index": end,
+                "line_end_index": line_end,
+                "line": line_number_at(tex_text, start),
+                "indent": match.group("indent"),
+                "preview": line_preview_at(tex_text, start),
+            }
+        )
+    return targets
+
+
+def find_blank_report_item_targets(
+    tex_text: str,
+    section_id: str | None = None,
+) -> list[dict[str, Any]]:
+    resolved = resolve_summary_section(tex_text, section_id)
+    if not resolved["ok"]:
+        return []
+    return find_blank_item_targets_in_section(tex_text, resolved["section"])
+
+
+def default_item_indent_for_section(tex_text: str, section: dict[str, Any]) -> str:
+    begin_index = int(section["begin_index"])
+    end_index = int(section["end_index"])
+    body = tex_text[begin_index:end_index]
+    first_item = re.search(r"(?m)^(?P<indent>[ \t]*)\\item(?:\s|$)", body)
+    if first_item:
+        return first_item.group("indent")
+    section_line = line_preview_at(tex_text, int(section["begin_index"]))
+    return re.match(r"^[ \t]*", section_line).group(0) + "\t"
+
+
+def describe_report_summary_target(
+    tex_text: str,
+    section_id: str | None = None,
+) -> dict[str, Any]:
+    resolved = resolve_summary_section(tex_text, section_id)
+    sections = section_options_for_client(resolved.get("sections", []))
+    if not resolved["ok"]:
+        return {
+            **resolved,
+            "sections": sections,
+        }
+
+    section = resolved["section"]
+    blank_targets = find_blank_item_targets_in_section(tex_text, section)
+    target_lines = [
+        {
+            "line": target["line"],
+            "preview": target["preview"] or r"\item",
+        }
+        for target in blank_targets[:10]
+    ]
+    common = {
+        "ok": True,
+        "sections": sections,
+        "section_id": section["id"],
+        "section_title": section["title"],
+        "section_label": section["label"],
+        "section_line": section["line"],
+        "section_preview": section["preview"],
+        "report_line": section["line"],
+        "report_preview": section["preview"],
+    }
+    if blank_targets:
+        first_target = blank_targets[0]
+        return {
+            **common,
+            "mode": "fill-empty-items",
+            "line": first_target["line"],
+            "detail": f"{section['label']} 内にある既存の空の \\item 行へ上から順に入力します。",
+            "preview": first_target["preview"] or r"\item",
+            "blank_item_count": len(blank_targets),
+            "target_lines": target_lines,
+        }
+
+    insert_index = tex_text.rfind("\n", 0, int(section["end_index"]))
+    insert_index = int(section["end_index"]) if insert_index == -1 else insert_index + 1
+    return {
+        **common,
+        "mode": "append-items",
+        "line": line_number_at(tex_text, insert_index),
+        "detail": f"{section['label']} 内に空の \\item がないため、セクション末尾へ \\item を追加します。",
+        "preview": line_preview_at(tex_text, insert_index),
+        "blank_item_count": 0,
+        "target_lines": [],
+        "append_index": insert_index,
+    }
+
+
+def insert_report_summary_items(
+    tex_text: str,
+    items: list[str],
+    section_id: str | None = None,
+) -> str:
+    if not items:
+        raise RuntimeError("No report summary items were generated.")
+
+    target = describe_report_summary_target(tex_text, section_id)
+    if not target["ok"]:
+        raise RuntimeError(str(target["reason"]))
+
+    section = resolve_summary_section(tex_text, target["section_id"])["section"]
+    blank_targets = find_blank_item_targets_in_section(tex_text, section)
+    if blank_targets:
+        replacements: list[tuple[int, int, str]] = []
+        for item, blank_target in zip(items, blank_targets):
+            replacement = f"{blank_target['indent']}\\item {escape_tex(item)}"
+            replacements.append(
+                (
+                    int(blank_target["start_index"]),
+                    int(blank_target["end_index"]),
+                    replacement,
+                )
+            )
+
+        extra_items = items[len(blank_targets) :]
+        if extra_items:
+            last_target = blank_targets[min(len(items), len(blank_targets)) - 1]
+            extra_lines = [
+                f"{last_target['indent']}\\item {escape_tex(item)}" for item in extra_items
+            ]
+            insertion_index = int(last_target["line_end_index"])
+            replacements.append((insertion_index, insertion_index, "\n".join(extra_lines) + "\n"))
+
+        updated = tex_text
+        for start, end, replacement in sorted(replacements, reverse=True):
+            updated = updated[:start] + replacement + updated[end:]
+        return updated
+
+    insert_index = tex_text.rfind("\n", 0, int(section["end_index"]))
+    insert_index = int(section["end_index"]) if insert_index == -1 else insert_index + 1
+    indent = default_item_indent_for_section(tex_text, section)
+    lines = [f"{indent}\\item {escape_tex(item)}" for item in items]
+    return tex_text[:insert_index] + "\n".join(lines) + "\n" + tex_text[insert_index:]
+
+
+def clear_report_summary_items(
+    tex_text: str,
+    previous_items: list[str],
+    section_id: str | None = None,
+) -> str:
+    if not previous_items:
+        return tex_text
+
+    resolved = resolve_summary_section(tex_text, section_id)
+    if not resolved["ok"]:
+        return tex_text
+
+    section = resolved["section"]
+    begin_index = int(section["begin_index"])
+    end_index = int(section["end_index"])
+    replacements: list[tuple[int, int, str]] = []
+    search_start = begin_index
+    for item in previous_items:
+        escaped_item = escape_tex(item)
+        pattern = re.compile(
+            r"(?m)^(?P<indent>[ \t]*)\\item[ \t]+"
+            + re.escape(escaped_item)
+            + r"[ \t]*$"
+        )
+        match = pattern.search(tex_text, search_start, end_index)
+        if not match:
+            continue
+        replacements.append(
+            (
+                match.start(),
+                match.end(),
+                f"{match.group('indent')}\\item",
+            )
+        )
+        search_start = match.end()
+
+    updated = tex_text
+    for start, end, replacement in sorted(replacements, reverse=True):
+        updated = updated[:start] + replacement + updated[end:]
+    return updated
+
+
+def replace_report_summary_items(
+    tex_text: str,
+    previous_items: list[str],
+    new_items: list[str],
+    section_id: str | None = None,
+) -> str:
+    cleared_text = clear_report_summary_items(tex_text, previous_items, section_id)
+    return insert_report_summary_items(cleared_text, new_items, section_id)
+
+
+def should_summarize_transcript(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or stripped == "(no speech)":
+        return False
+    return not stripped.startswith("[transcription failed:")
+
+
 def merge_document_with_server(submitted_text: str, base_text: str, current_text: str) -> str:
     submitted = ensure_auto_block(submitted_text)
     base = ensure_auto_block(base_text)
@@ -770,21 +1350,36 @@ class MeetingAppState:
     status_warning: str = field(default="")
     transcript_entries: list[TranscriptEntry] = field(default_factory=list)
     auto_reflect: bool = field(default=True)
+    auto_summarize: bool = field(default=True)
     logs: list[str] = field(default_factory=list)
     compile_log: str = field(default="")
     compile_ok: bool | None = field(default=None)
     pdf_path: str | None = field(default=None)
     llm_provider: str = field(default_factory=default_llm_provider)
+    summary_section_id: str | None = field(default=None)
+    report_summary_items_by_section: dict[str, list[str]] = field(default_factory=dict)
+    report_summary_last_entry_index: int = field(default=0)
+    report_summary_status: str = field(default="待機中")
+    report_summary_error: str = field(default="")
 
     def __post_init__(self) -> None:
         self.lock = threading.RLock()
         self.controller: RecordingController | None = None
         self.document_history: dict[int, str] = {}
+        self.summary_queue: queue.Queue[object] = queue.Queue()
+        self.summary_worker = threading.Thread(
+            target=self._summary_worker_loop,
+            daemon=True,
+        )
         text, encoding = prepare_daily_document(self.document_path)
         self.document_text = text
         self.document_encoding = encoding
         self.document_version = 1
         self.document_history[self.document_version] = text
+        resolved = resolve_summary_section(text, self.summary_section_id)
+        if resolved["ok"]:
+            self.summary_section_id = resolved["section"]["id"]
+        self.summary_worker.start()
 
     def add_log(self, message: str) -> None:
         with self.lock:
@@ -829,6 +1424,92 @@ class MeetingAppState:
             self.auto_reflect = enabled
         self.add_log(f"auto-reflect={'on' if enabled else 'off'}")
 
+    def set_auto_summarize(self, enabled: bool) -> None:
+        with self.lock:
+            self.auto_summarize = enabled
+            if enabled:
+                self.report_summary_status = "待機中"
+        self.add_log(f"auto-summary={'on' if enabled else 'off'}")
+        if enabled:
+            self.request_auto_summary()
+
+    def request_auto_summary(self) -> None:
+        try:
+            self.summary_queue.put_nowait(object())
+        except Exception as exc:
+            self.add_log(f"auto-summary queue failed: {exc}")
+
+    def _summary_worker_loop(self) -> None:
+        while True:
+            self.summary_queue.get()
+            while True:
+                try:
+                    self.summary_queue.get_nowait()
+                except queue.Empty:
+                    break
+            try:
+                self._summarize_pending_transcripts()
+            except Exception as exc:
+                with self.lock:
+                    self.report_summary_status = "失敗"
+                    self.report_summary_error = str(exc)
+                self.add_log(f"auto-summary failed: {exc}")
+
+    def _summarize_pending_transcripts(self) -> None:
+        with self.lock:
+            if not self.auto_summarize:
+                return
+            pending_entries = [
+                entry
+                for entry in self.transcript_entries
+                if entry.index > self.report_summary_last_entry_index
+                and should_summarize_transcript(entry.text)
+            ]
+            if not pending_entries:
+                return
+            recent_entries = [
+                entry
+                for entry in self.transcript_entries
+                if should_summarize_transcript(entry.text)
+            ][-SUMMARY_CONTEXT_SEGMENTS:]
+            target = describe_report_summary_target(self.document_text, self.summary_section_id)
+            if not target["ok"]:
+                raise RuntimeError(str(target["reason"]))
+            section_id = str(target["section_id"])
+            section_label = str(target["section_label"])
+            self.summary_section_id = section_id
+            previous_items = list(self.report_summary_items_by_section.get(section_id, []))
+            provider_id = self.llm_provider
+            self.report_summary_status = "要約中"
+            self.report_summary_error = ""
+
+        items = summarize_incremental_report_items(
+            provider_id,
+            previous_items,
+            recent_entries,
+            pending_entries,
+            section_label,
+        )
+        last_entry_index = max(entry.index for entry in pending_entries)
+        with self.lock:
+            updated_text = replace_report_summary_items(
+                self.document_text,
+                previous_items,
+                items,
+                section_id,
+            )
+            self._write_document(updated_text)
+            self.report_summary_items_by_section[section_id] = items
+            self.report_summary_last_entry_index = last_entry_index
+            self.report_summary_status = "待機中"
+            self.report_summary_error = ""
+            version = self.document_version
+        self.add_log(
+            f"auto-summary updated section={section_label} items={len(items)} "
+            f"through segment={last_entry_index:03d} provider={provider_id}"
+        )
+        return version
+
     def on_recording_started(
         self,
         recording_path: Path,
@@ -846,6 +1527,10 @@ class MeetingAppState:
             self.file_size_mb = 0.0
             self.status_warning = ""
             self.transcript_entries = []
+            self.report_summary_items_by_section = {}
+            self.report_summary_last_entry_index = 0
+            self.report_summary_status = "待機中"
+            self.report_summary_error = ""
         self.add_log("recording started")
 
     def on_status(
@@ -864,6 +1549,7 @@ class MeetingAppState:
     def on_transcript(self, entry: TranscriptEntry) -> None:
         with self.lock:
             self.transcript_entries.append(entry)
+            should_request_summary = self.auto_summarize and should_summarize_transcript(entry.text)
             if self.auto_reflect:
                 time_label = format_hms(entry.start_sec)
                 updated_text = append_transcript_entry(
@@ -874,6 +1560,8 @@ class MeetingAppState:
                 )
                 self._write_document(updated_text)
         self.add_log(f"transcript segment {entry.index:03d} received")
+        if should_request_summary:
+            self.request_auto_summary()
 
     def on_recording_finished(self, duration: float) -> None:
         with self.lock:
@@ -889,12 +1577,14 @@ class MeetingAppState:
         device: int | None,
         transcriber_mode: str,
         auto_reflect: bool,
+        auto_summarize: bool,
         language: str | None,
     ) -> None:
         with self.lock:
             if self.recording_active:
                 raise RuntimeError("Recording is already active.")
             self.auto_reflect = auto_reflect
+            self.auto_summarize = auto_summarize
         api_provider = api_provider_from_transcriber_mode(transcriber_mode)
         if api_provider:
             self.set_llm_provider(api_provider)
@@ -970,6 +1660,94 @@ class MeetingAppState:
             "pdf_path": self.pdf_path,
         }
 
+    def summarize_report_items(self, provider: str | None = None) -> dict[str, Any]:
+        with self.lock:
+            entries = list(self.transcript_entries)
+            provider_id = provider or self.llm_provider
+            target = describe_report_summary_target(self.document_text, self.summary_section_id)
+            if not target["ok"]:
+                raise RuntimeError(str(target["reason"]))
+            section_id = str(target["section_id"])
+            section_label = str(target["section_label"])
+            self.summary_section_id = section_id
+            previous_items = list(self.report_summary_items_by_section.get(section_id, []))
+
+        items = summarize_transcript_entries(provider_id, entries, section_label)
+        with self.lock:
+            updated_text = replace_report_summary_items(
+                self.document_text,
+                previous_items,
+                items,
+                section_id,
+            )
+            self._write_document(updated_text)
+            self.report_summary_items_by_section[section_id] = items
+            self.report_summary_last_entry_index = max(
+                (entry.index for entry in entries),
+                default=self.report_summary_last_entry_index,
+            )
+            self.report_summary_status = "待機中"
+            self.report_summary_error = ""
+            version = self.document_version
+        self.add_log(
+            f"report summary inserted section={section_label} "
+            f"items={len(items)} provider={provider_id}"
+        )
+        return {
+            "ok": True,
+            "provider": provider_id,
+            "section_id": section_id,
+            "section_label": section_label,
+            "item_count": len(items),
+            "items": items,
+            "version": version,
+        }
+
+    def report_summary_target_snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            target = describe_report_summary_target(self.document_text, self.summary_section_id)
+            if target["ok"]:
+                self.summary_section_id = str(target["section_id"])
+            entries = list(self.transcript_entries)
+            document_path = str(self.document_path.relative_to(ROOT_DIR))
+            summary_count = len(
+                self.report_summary_items_by_section.get(self.summary_section_id or "", [])
+            )
+            auto_summarize = self.auto_summarize
+            summary_status = self.report_summary_status
+            summary_error = self.report_summary_error
+            last_summarized_segment = self.report_summary_last_entry_index
+
+        transcript_text = transcript_entries_to_text(entries)
+        return {
+            "document_path": document_path,
+            "transcript_entry_count": len(entries),
+            "transcript_text_chars": len(transcript_text),
+            "report_summary_count": summary_count,
+            "auto_summarize": auto_summarize,
+            "summary_status": summary_status,
+            "summary_error": summary_error,
+            "last_summarized_segment": last_summarized_segment,
+            **target,
+        }
+
+    def set_summary_section(self, section_id: str) -> dict[str, Any]:
+        with self.lock:
+            target = describe_report_summary_target(self.document_text, section_id)
+            if not target["ok"]:
+                raise RuntimeError(str(target["reason"]))
+            self.summary_section_id = str(target["section_id"])
+            self.report_summary_status = "待機中"
+            self.report_summary_error = ""
+            selected = self.summary_section_id
+            label = str(target["section_label"])
+        self.add_log(f"summary-section={label}")
+        return {
+            "ok": True,
+            "selected": selected,
+            "label": label,
+        }
+
     def llm_provider_snapshot(self) -> dict[str, Any]:
         with self.lock:
             selected = self.llm_provider
@@ -1022,6 +1800,7 @@ class MeetingAppState:
                 "transcript_path": self.transcript_path,
                 "transcriber_mode": self.transcriber_mode,
                 "auto_reflect": self.auto_reflect,
+                "auto_summarize": self.auto_summarize,
                 "document_path": str(self.document_path.relative_to(ROOT_DIR)),
                 "document_version": self.document_version,
                 "transcript_entries": [
@@ -1039,6 +1818,13 @@ class MeetingAppState:
                 "compile_log": self.compile_log,
                 "pdf_path": self.pdf_path,
                 "llm_provider": self.llm_provider,
+                "summary_section_id": self.summary_section_id,
+                "report_summary_count": len(
+                    self.report_summary_items_by_section.get(self.summary_section_id or "", [])
+                ),
+                "report_summary_status": self.report_summary_status,
+                "report_summary_error": self.report_summary_error,
+                "last_summarized_segment": self.report_summary_last_entry_index,
             }
 
 
@@ -1049,6 +1835,7 @@ class StartRequest(BaseModel):
     device: int | None = None
     transcriber: str = "local"
     auto_reflect: bool = True
+    auto_summarize: bool = True
     language: str | None = "ja"
 
 
@@ -1061,6 +1848,14 @@ class AutoReflectRequest(BaseModel):
     enabled: bool
 
 
+class AutoSummaryRequest(BaseModel):
+    enabled: bool
+
+
+class SummarySectionRequest(BaseModel):
+    section_id: str
+
+
 class LlmProviderRequest(BaseModel):
     provider: str
 
@@ -1068,6 +1863,10 @@ class LlmProviderRequest(BaseModel):
 class LlmChatRequest(BaseModel):
     prompt: str
     system: str | None = None
+    provider: str | None = None
+
+
+class ReportSummaryRequest(BaseModel):
     provider: str | None = None
 
 
@@ -1111,6 +1910,7 @@ def start_recording(request: StartRequest) -> dict[str, Any]:
             device=request.device,
             transcriber_mode=request.transcriber,
             auto_reflect=request.auto_reflect,
+            auto_summarize=request.auto_summarize,
             language=request.language,
         )
     except Exception as exc:
@@ -1128,6 +1928,20 @@ def stop_recording() -> dict[str, Any]:
 def set_auto_reflect(request: AutoReflectRequest) -> dict[str, Any]:
     manager.set_auto_reflect(request.enabled)
     return {"ok": True}
+
+
+@app.post("/api/auto-summary")
+def set_auto_summary(request: AutoSummaryRequest) -> dict[str, Any]:
+    manager.set_auto_summarize(request.enabled)
+    return {"ok": True}
+
+
+@app.post("/api/report-summary/section")
+def set_report_summary_section(request: SummarySectionRequest) -> dict[str, Any]:
+    try:
+        return manager.set_summary_section(request.section_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/compile")
@@ -1158,6 +1972,19 @@ def chat_with_llm(request: LlmChatRequest) -> dict[str, Any]:
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/report-summary")
+def summarize_report_items(request: ReportSummaryRequest) -> dict[str, Any]:
+    try:
+        return manager.summarize_report_items(provider=request.provider)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/report-summary/target")
+def get_report_summary_target() -> dict[str, Any]:
+    return manager.report_summary_target_snapshot()
 
 
 @app.get("/api/devices")
