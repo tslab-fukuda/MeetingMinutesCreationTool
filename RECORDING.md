@@ -61,6 +61,14 @@ python .\tools\transcribe_audio.py .\recordings\meeting_recording_20260425_15391
 python .\tools\transcribe_audio.py .\recordings\meeting_recording_20260425_153915.wav --prompt "大学の会議。固有名詞を正確に書く。"
 ```
 
+Web アプリの録音では、文字起こし時に次の補助プロンプトを自動で渡します。
+
+```text
+会議の文字起こし。固有名詞を丁寧に扱う。
+```
+
+これは要約用ではなく、音声から文字へ変換する段階で、人名や資料名などの固有名詞をなるべく丁寧に扱うためのヒントです。
+
 ### APIキー
 
 文字起こしツールは、まず `local_settings.env` または環境変数 `OPENAI_API_KEY` を参照します。  
@@ -83,6 +91,11 @@ $env:OPENAI_API_KEY="your_api_key_here"
 ```text
 sk-...
 ```
+
+補足:
+
+- PowerShell 側に `OPENAI_API_KEY=sk-dummy` などのダミー値が残っている場合は、`local_settings.env` に実キーがあればそちらで上書きします。
+- 実キーが環境変数に設定されている場合は、その値を優先します。
 
 ## ライブ監視
 

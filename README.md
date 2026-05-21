@@ -234,6 +234,8 @@ $env:OPENAI_API_KEY="your_api_key_here"
 
 - API の利用料金は ChatGPT の通常契約とは別です。
 - API のクォータ不足時は、ローカル文字起こしに切り替えて使えます。
+- PowerShell 側に `OPENAI_API_KEY=sk-dummy` などのダミー値が残っている場合は、`local_settings.env` に実キーがあればそちらで上書きします。
+- Web アプリの録音では、文字起こし時に `会議の文字起こし。固有名詞を丁寧に扱う。` という補助プロンプトを渡します。
 
 ## LLM 設定
 

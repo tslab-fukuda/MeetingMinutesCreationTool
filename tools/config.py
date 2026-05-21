@@ -7,6 +7,13 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 LOCAL_SETTINGS_FILES = (".env", "local_settings.env")
+PLACEHOLDER_ENV_VALUES = {
+    "",
+    "dummy",
+    "sk-dummy",
+    "your_api_key_here",
+    "your_local_api_key_here",
+}
 
 
 def _clean_env_value(value: str) -> str:
@@ -14,6 +21,13 @@ def _clean_env_value(value: str) -> str:
     if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
         return cleaned[1:-1]
     return cleaned
+
+
+def _is_placeholder_env_value(value: str | None) -> bool:
+    if value is None:
+        return True
+    cleaned = _clean_env_value(value)
+    return cleaned.lower() in PLACEHOLDER_ENV_VALUES
 
 
 def load_local_settings(root_dir: Path = ROOT_DIR) -> None:
@@ -33,4 +47,6 @@ def load_local_settings(root_dir: Path = ROOT_DIR) -> None:
             key = key.strip()
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
                 continue
-            os.environ.setdefault(key, _clean_env_value(value))
+            cleaned_value = _clean_env_value(value)
+            if _is_placeholder_env_value(os.environ.get(key)):
+                os.environ[key] = cleaned_value
