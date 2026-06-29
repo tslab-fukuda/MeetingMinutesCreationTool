@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Meeting Minutes UI</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260430-section-summary" />
+    <link rel="stylesheet" href="/static/app.css?v=20260629-loading-log" />
   </head>
   <body>
     <div class="app-shell">
@@ -18,7 +18,7 @@
           <select id="transcriber-select">
             <option value="local">Local</option>
             <option value="api:openai">ChatGPT</option>
-            <option value="api:local">ローカルLLM</option>
+            <option value="api:local">ローカルLLM (Whisper文字起こし)</option>
             <option value="none">No Transcript</option>
           </select>
           <select id="llm-provider-select" hidden disabled></select>
@@ -33,7 +33,11 @@
           </label>
           <label class="toggle">
             <input id="auto-summary-toggle" type="checkbox" checked />
-            <span>即時要約</span>
+            <span>話題ごと要約</span>
+          </label>
+          <label class="toggle">
+            <input id="clean-transcript-toggle" type="checkbox" checked />
+            <span>文字起こし整形</span>
           </label>
         </div>
       </header>
@@ -89,6 +93,6 @@
         </div>
       </section>
     </div>
-    <script src="/static/app.js?v=20260430-section-summary"></script>
+    <script src="/static/app.js?v=20260629-loading-log"></script>
   </body>
   </html>

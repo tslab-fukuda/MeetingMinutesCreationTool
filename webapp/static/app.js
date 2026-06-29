@@ -25,6 +25,7 @@ const deviceSelect = document.getElementById("device-select");
 const transcriberSelect = document.getElementById("transcriber-select");
 const autoReflectToggle = document.getElementById("auto-reflect-toggle");
 const autoSummaryToggle = document.getElementById("auto-summary-toggle");
+const cleanTranscriptToggle = document.getElementById("clean-transcript-toggle");
 const startButton = document.getElementById("start-button");
 const stopButton = document.getElementById("stop-button");
 const summaryButton = document.getElementById("summary-button");
@@ -89,6 +90,7 @@ async function refreshStatus() {
   meterBar.style.width = `${Math.min(100, (data.current_rms / 2500) * 100)}%`;
   autoReflectToggle.checked = data.auto_reflect;
   autoSummaryToggle.checked = data.auto_summarize;
+  cleanTranscriptToggle.checked = data.clean_transcripts !== false;
   renderTranscript(data.transcript_entries || []);
   logOutput.textContent = (data.logs || []).join("\n");
   compileOutput.textContent = data.compile_log || "";
@@ -176,8 +178,9 @@ function renderReportSummaryTarget(data) {
     `空の \\item 数: ${data.blank_item_count}`,
     `文字起こし: ${data.transcript_entry_count} segments / ${data.transcript_text_chars}文字`,
     `選択セクションの自動要約項目数: ${data.report_summary_count}`,
-    `即時要約: ${data.auto_summarize ? "ON" : "OFF"} / 状態: ${data.summary_status || "-"}`,
+    `話題ごと要約: ${data.auto_summarize ? "ON" : "OFF"} / 状態: ${data.summary_status || "-"}`,
     `要約済みsegment: ${data.last_summarized_segment || 0}`,
+    `蓄積中(話題まとめ待ち): ${data.buffered_segment_count || 0} segments`,
   ];
   if (data.summary_error) {
     detailLines.push(`要約エラー: ${data.summary_error}`);
@@ -239,6 +242,7 @@ async function startRecording() {
       transcriber: transcriberSelect.value,
       auto_reflect: autoReflectToggle.checked,
       auto_summarize: autoSummaryToggle.checked,
+      clean_transcripts: cleanTranscriptToggle.checked,
       language: "ja",
     }),
   });
@@ -292,10 +296,17 @@ texEditor.addEventListener("input", () => {
 });
 
 startButton.addEventListener("click", async () => {
+  const originalLabel = startButton.textContent;
+  startButton.disabled = true;
+  startButton.textContent = "準備中...";
+  appendClientLog("recording start requested (preparing transcriber model)...");
   try {
     await startRecording();
   } catch (error) {
     alert(error.message);
+  } finally {
+    startButton.disabled = false;
+    startButton.textContent = originalLabel;
   }
 });
 
@@ -355,6 +366,17 @@ autoSummaryToggle.addEventListener("change", async () => {
       body: JSON.stringify({ enabled: autoSummaryToggle.checked }),
     });
     await refreshReportSummaryTarget();
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
+cleanTranscriptToggle.addEventListener("change", async () => {
+  try {
+    await api("/api/clean-transcripts", {
+      method: "POST",
+      body: JSON.stringify({ enabled: cleanTranscriptToggle.checked }),
+    });
   } catch (error) {
     alert(error.message);
   }

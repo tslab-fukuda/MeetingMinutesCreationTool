@@ -47,7 +47,9 @@ AUTO_HEADER_LINES = [
     r"\begin{itemize}",
 ]
 AUTO_FOOTER_LINES = [r"\end{itemize}"]
-SUMMARY_CONTEXT_SEGMENTS = 6
+# When a single topic keeps going without a detected change, force a summary
+# after this many buffered 15s segments (~6 minutes) so nothing is lost.
+MAX_TOPIC_BUFFER_SEGMENTS = 24
 REPORT_SUMMARY_MAX_ITEM_CHARS = 70
 REPORT_SUMMARY_REFINE_THRESHOLD_CHARS = 90
 DEFAULT_SUMMARY_SECTION_TITLE = "報告事項"
@@ -224,6 +226,29 @@ def call_llm(provider_id: str, prompt: str, system: str | None = None) -> str:
     return str(response.choices[0].message.content or "").strip()
 
 
+def tidy_transcript_text(provider_id: str, text: str) -> str:
+    """Clean up a noisy speech-to-text segment with the LLM (meaning preserved)."""
+    system = (
+        "You clean up noisy Japanese speech-to-text transcripts "
+        "without changing their meaning."
+    )
+    prompt = "\n".join(
+        [
+            "Rewrite the following Japanese speech-to-text segment so it reads naturally.",
+            "Fix obvious recognition errors, word spacing, and punctuation.",
+            "Keep the speaker's original meaning and wording as much as possible.",
+            "Do not summarize, translate, add, or drop information.",
+            "Do not add quotes, labels, or commentary; output only the cleaned text.",
+            "",
+            text,
+        ]
+    )
+    cleaned = call_llm(provider_id, prompt, system).strip().strip("`").strip()
+    if len(cleaned) >= 2 and cleaned[0] in "「\"'" and cleaned[-1] in "」\"'":
+        cleaned = cleaned[1:-1].strip()
+    return cleaned or text
+
+
 def api_provider_from_transcriber_mode(transcriber_mode: str) -> str | None:
     if transcriber_mode == "api":
         return "openai"
@@ -235,6 +260,20 @@ def api_provider_from_transcriber_mode(transcriber_mode: str) -> str | None:
 
 def local_transcription_model(provider: dict[str, Any]) -> str:
     return first_env_value("LOCAL_TRANSCRIBE_MODEL", "LOCAL_LLM_MODEL", "MODEL") or provider["model"]
+
+
+def local_whisper_settings() -> dict[str, str]:
+    """faster-whisper model/device settings for local transcription.
+
+    ``small`` is a good Japanese accuracy/CPU-speed balance; ``tiny`` (the old
+    default) is fast but very inaccurate for Japanese. GPU users can set
+    LOCAL_WHISPER_DEVICE=cuda and LOCAL_WHISPER_COMPUTE_TYPE=float16.
+    """
+    return {
+        "model": env_value("LOCAL_WHISPER_MODEL") or "small",
+        "device": env_value("LOCAL_WHISPER_DEVICE") or "cpu",
+        "compute_type": env_value("LOCAL_WHISPER_COMPUTE_TYPE") or "int8",
+    }
 
 
 def escape_tex(text: str) -> str:
@@ -583,42 +622,45 @@ def summarize_transcript_entries(
     return finalize_report_summary_items(provider_id, items, target_label)
 
 
-def summarize_incremental_report_items(
+def detect_topic_change(
     provider_id: str,
-    previous_items: list[str],
-    recent_entries: list["TranscriptEntry"],
-    new_entries: list["TranscriptEntry"],
-    target_label: str = DEFAULT_SUMMARY_SECTION_TITLE,
-) -> list[str]:
-    source_text = transcript_entries_to_text(new_entries)
-    if not source_text:
-        raise RuntimeError("No new transcript text is available to summarize.")
+    current_topic_entries: list["TranscriptEntry"],
+    new_entry: "TranscriptEntry",
+) -> bool:
+    """Ask the LLM whether ``new_entry`` starts a new topic.
 
-    previous_text = "\n".join(f"- {item}" for item in previous_items) or "(まだありません)"
-    recent_text = transcript_entries_to_text(recent_entries) or "(まだありません)"
-    system = "You maintain concise Japanese meeting-minutes items from streaming transcript chunks."
+    Returns True when the new transcript chunk clearly moves on to a different
+    topic, so the buffered conversation can be summarized as a finished topic.
+    A 15s chunk that merely continues (even if cut off mid-sentence) returns
+    False so it stays buffered.
+    """
+    current_text = transcript_entries_to_text(current_topic_entries)
+    new_text = transcript_entries_to_text([new_entry])
+    if not current_text or not new_text:
+        return False
+
+    system = "You detect whether a Japanese meeting conversation has moved on to a new topic."
     prompt = "\n".join(
         [
-            *report_summary_instruction_lines(target_label),
-            f"The target section is '{target_label}'.",
-            "Merge the existing draft items with the new transcript chunk and output the updated full item list.",
-            "Transcript chunks may end mid-sentence, so merge them into the existing item when the topic is continuing.",
-            "Add a new item only when the topic clearly changes.",
-            "Do not let chunk boundaries or spoken repetition leak into the final items.",
+            "Decide whether the new transcript chunk continues the same topic as the "
+            "ongoing conversation, or clearly starts a different topic.",
+            "The chunks come from 15-second recording segments, so a sentence cut off "
+            "at the boundary is a continuation, not a new topic.",
+            "Follow-up questions, examples, and minor digressions about the same matter "
+            "are continuations.",
+            "Only answer NEWTOPIC when the subject of discussion clearly changes.",
+            "Answer with exactly one word: CONTINUE or NEWTOPIC.",
             "",
-            "[現在の項目候補]",
-            previous_text,
+            "[Ongoing conversation]",
+            current_text,
             "",
-            "[直近の文字起こし文脈]",
-            recent_text,
-            "",
-            "[今回新しく追加された文字起こし]",
-            source_text,
+            "[New transcript chunk]",
+            new_text,
         ]
     )
-    summary_text = call_llm(provider_id, prompt, system)
-    items = parse_report_summary_items(summary_text)
-    return finalize_report_summary_items(provider_id, items, target_label)
+    answer = call_llm(provider_id, prompt, system)
+    compact = re.sub(r"[^A-Z]", "", answer.upper())
+    return compact.startswith("NEWTOPIC")
 
 
 def line_number_at(text: str, index: int) -> int:
@@ -1043,21 +1085,31 @@ class TranscriptEntry:
 
 
 class LocalTranscriber:
-    def __init__(self, model_name: str, language: str | None, prompt: str | None) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        language: str | None,
+        prompt: str | None,
+        *,
+        device: str = "cpu",
+        compute_type: str = "int8",
+    ) -> None:
         if WhisperModel is None:
             raise RuntimeError(
                 "Local transcription requires faster-whisper. "
                 "Run 'python -m pip install faster-whisper'."
             )
-        self.model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
         self.language = language
         self.prompt = prompt
 
     def transcribe(self, audio_path: Path) -> str:
+        # Intentionally do not pass ``initial_prompt`` here. faster-whisper echoes
+        # the prompt into the output on quiet/short segments (e.g. the first one),
+        # which leaked the instruction text into the live transcript.
         segments, _ = self.model.transcribe(
             str(audio_path),
             language=self.language,
-            initial_prompt=self.prompt,
             vad_filter=True,
         )
         return " ".join(segment.text.strip() for segment in segments).strip()
@@ -1163,12 +1215,18 @@ class RecordingController:
     ):
         if transcriber_mode == "none":
             return None
+        whisper = local_whisper_settings()
         if transcriber_mode == "local":
-            return LocalTranscriber(local_model, language, prompt)
+            return self._build_local_transcriber(local_model, language, prompt, whisper)
         api_provider = api_provider_from_transcriber_mode(transcriber_mode)
         if api_provider == "openai":
             model_name = env_value("OPENAI_TRANSCRIBE_MODEL") or api_model
             return ApiTranscriber(model_name, language, prompt)
+        if api_provider == "local":
+            # Text-only local LLMs (e.g. gpt-oss) can't accept audio, so transcribe
+            # locally with faster-whisper and let the local LLM handle only the text
+            # summary. The summary provider is set to "local" in start_recording.
+            return self._build_local_transcriber(local_model, language, prompt, whisper)
         if api_provider:
             providers = llm_provider_configs()
             provider = providers.get(api_provider)
@@ -1187,6 +1245,37 @@ class RecordingController:
                 missing_message=f"API provider '{api_provider}' is not configured.",
             )
         raise RuntimeError(f"Unknown transcriber mode: {transcriber_mode}")
+
+    def _build_local_transcriber(
+        self,
+        model_name: str,
+        language: str | None,
+        prompt: str | None,
+        whisper: dict[str, str],
+    ) -> "LocalTranscriber":
+        # WhisperModel() downloads the model on first use and then loads it, which
+        # blocks the start request. Log around it so the UI shows what is happening
+        # instead of looking frozen (elapsed time only starts after this returns).
+        self.manager.add_log(
+            f"loading whisper model '{model_name}' on {whisper['device']} "
+            f"(first run downloads it, ~500MB for 'small'; please wait)"
+        )
+        started = time.time()
+        try:
+            transcriber = LocalTranscriber(
+                model_name,
+                language,
+                prompt,
+                device=whisper["device"],
+                compute_type=whisper["compute_type"],
+            )
+        except Exception as exc:
+            self.manager.add_log(f"whisper model '{model_name}' failed to load: {exc}")
+            raise
+        self.manager.add_log(
+            f"whisper model '{model_name}' ready ({time.time() - started:.1f}s)"
+        )
+        return transcriber
 
     def start(self) -> None:
         self.thread.start()
@@ -1315,6 +1404,9 @@ class RecordingController:
         except Exception as exc:
             transcript = f"[transcription failed: {exc}]"
 
+        # Tidy the noisy speech-to-text with the LLM before it is stored/shown.
+        transcript = self.manager.clean_transcript_text(transcript)
+
         header = f"[segment {index:03d} {format_hms(start_sec)} - {format_hms(end_sec)}]"
         with self.transcript_path.open("a", encoding="utf-8") as fh:
             fh.write(f"{header}\n{transcript}\n\n")
@@ -1351,6 +1443,7 @@ class MeetingAppState:
     transcript_entries: list[TranscriptEntry] = field(default_factory=list)
     auto_reflect: bool = field(default=True)
     auto_summarize: bool = field(default=True)
+    clean_transcripts: bool = field(default=True)
     logs: list[str] = field(default_factory=list)
     compile_log: str = field(default="")
     compile_ok: bool | None = field(default=None)
@@ -1359,6 +1452,7 @@ class MeetingAppState:
     summary_section_id: str | None = field(default=None)
     report_summary_items_by_section: dict[str, list[str]] = field(default_factory=dict)
     report_summary_last_entry_index: int = field(default=0)
+    report_summary_decided_index: int = field(default=0)
     report_summary_status: str = field(default="待機中")
     report_summary_error: str = field(default="")
 
@@ -1367,6 +1461,7 @@ class MeetingAppState:
         self.controller: RecordingController | None = None
         self.document_history: dict[int, str] = {}
         self.summary_queue: queue.Queue[object] = queue.Queue()
+        self._summary_flush_pending = False
         self.summary_worker = threading.Thread(
             target=self._summary_worker_loop,
             daemon=True,
@@ -1424,6 +1519,29 @@ class MeetingAppState:
             self.auto_reflect = enabled
         self.add_log(f"auto-reflect={'on' if enabled else 'off'}")
 
+    def set_clean_transcripts(self, enabled: bool) -> None:
+        with self.lock:
+            self.clean_transcripts = enabled
+        self.add_log(f"clean-transcripts={'on' if enabled else 'off'}")
+
+    def clean_transcript_text(self, text: str) -> str:
+        """Tidy a raw segment via the LLM when enabled; fall back to raw on any issue."""
+        raw = (text or "").strip()
+        if not should_summarize_transcript(raw):
+            return raw
+        with self.lock:
+            if not self.clean_transcripts:
+                return raw
+            provider_id = self.llm_provider
+        provider = llm_provider_configs().get(provider_id)
+        if provider is None or not provider_snapshot(provider)["configured"]:
+            return raw
+        try:
+            return tidy_transcript_text(provider_id, raw)
+        except Exception as exc:
+            self.add_log(f"transcript cleanup failed: {exc}")
+            return raw
+
     def set_auto_summarize(self, enabled: bool) -> None:
         with self.lock:
             self.auto_summarize = enabled
@@ -1433,8 +1551,11 @@ class MeetingAppState:
         if enabled:
             self.request_auto_summary()
 
-    def request_auto_summary(self) -> None:
+    def request_auto_summary(self, flush: bool = False) -> None:
         try:
+            if flush:
+                with self.lock:
+                    self._summary_flush_pending = True
             self.summary_queue.put_nowait(object())
         except Exception as exc:
             self.add_log(f"auto-summary queue failed: {exc}")
@@ -1447,68 +1568,134 @@ class MeetingAppState:
                     self.summary_queue.get_nowait()
                 except queue.Empty:
                     break
+            with self.lock:
+                flush = self._summary_flush_pending
+                self._summary_flush_pending = False
             try:
-                self._summarize_pending_transcripts()
+                self._summarize_pending_transcripts(flush=flush)
             except Exception as exc:
                 with self.lock:
                     self.report_summary_status = "失敗"
                     self.report_summary_error = str(exc)
                 self.add_log(f"auto-summary failed: {exc}")
 
-    def _summarize_pending_transcripts(self) -> None:
+    def _commit_topic_summary(
+        self,
+        provider_id: str,
+        topic_entries: list[TranscriptEntry],
+        previous_items: list[str],
+        section_id: str,
+        section_label: str,
+        status_label: str,
+    ) -> None:
         with self.lock:
-            if not self.auto_summarize:
-                return
-            pending_entries = [
-                entry
-                for entry in self.transcript_entries
-                if entry.index > self.report_summary_last_entry_index
-                and should_summarize_transcript(entry.text)
-            ]
-            if not pending_entries:
-                return
-            recent_entries = [
-                entry
-                for entry in self.transcript_entries
-                if should_summarize_transcript(entry.text)
-            ][-SUMMARY_CONTEXT_SEGMENTS:]
-            target = describe_report_summary_target(self.document_text, self.summary_section_id)
-            if not target["ok"]:
-                raise RuntimeError(str(target["reason"]))
-            section_id = str(target["section_id"])
-            section_label = str(target["section_label"])
-            self.summary_section_id = section_id
-            previous_items = list(self.report_summary_items_by_section.get(section_id, []))
-            provider_id = self.llm_provider
-            self.report_summary_status = "要約中"
+            self.report_summary_status = status_label
             self.report_summary_error = ""
-
-        items = summarize_incremental_report_items(
-            provider_id,
-            previous_items,
-            recent_entries,
-            pending_entries,
-            section_label,
-        )
-        last_entry_index = max(entry.index for entry in pending_entries)
+        items = summarize_transcript_entries(provider_id, topic_entries, section_label)
+        new_items = previous_items + items
+        completed_index = topic_entries[-1].index
         with self.lock:
             updated_text = replace_report_summary_items(
                 self.document_text,
                 previous_items,
-                items,
+                new_items,
                 section_id,
             )
             self._write_document(updated_text)
-            self.report_summary_items_by_section[section_id] = items
-            self.report_summary_last_entry_index = last_entry_index
+            self.report_summary_items_by_section[section_id] = new_items
+            self.report_summary_last_entry_index = completed_index
+            self.report_summary_decided_index = completed_index
             self.report_summary_status = "待機中"
             self.report_summary_error = ""
-            version = self.document_version
         self.add_log(
-            f"auto-summary updated section={section_label} items={len(items)} "
-            f"through segment={last_entry_index:03d} provider={provider_id}"
+            f"topic summary appended section={section_label} items={len(items)} "
+            f"through segment={completed_index:03d} provider={provider_id}"
         )
-        return version
+
+    def _summarize_pending_transcripts(self, flush: bool = False) -> None:
+        # Buffer transcript segments per topic. Only when the topic changes (or on
+        # flush / a safety size cap) do we summarize the buffered segments and append
+        # them as finished meeting-minute items, so a conversation cut across 15s
+        # segments is summarized as a whole instead of per fragment.
+        while True:
+            with self.lock:
+                if not self.auto_summarize and not flush:
+                    return
+                summarizable = [
+                    entry
+                    for entry in self.transcript_entries
+                    if should_summarize_transcript(entry.text)
+                ]
+                finalized_index = self.report_summary_last_entry_index
+                decided_index = self.report_summary_decided_index
+                current_topic = [
+                    entry
+                    for entry in summarizable
+                    if finalized_index < entry.index <= decided_index
+                ]
+                undecided = [entry for entry in summarizable if entry.index > decided_index]
+                target = describe_report_summary_target(
+                    self.document_text, self.summary_section_id
+                )
+                if not target["ok"]:
+                    raise RuntimeError(str(target["reason"]))
+                section_id = str(target["section_id"])
+                section_label = str(target["section_label"])
+                self.summary_section_id = section_id
+                previous_items = list(self.report_summary_items_by_section.get(section_id, []))
+                provider_id = self.llm_provider
+
+            if not undecided:
+                # Nothing new to classify. On flush (e.g. recording stopped), finalize
+                # the buffered topic so the last topic is not lost.
+                if flush and current_topic:
+                    self._commit_topic_summary(
+                        provider_id,
+                        current_topic,
+                        previous_items,
+                        section_id,
+                        section_label,
+                        "最終要約中",
+                    )
+                else:
+                    with self.lock:
+                        if self.report_summary_status in {"話題判定中", "蓄積中", "要約中"}:
+                            self.report_summary_status = "待機中"
+                return
+
+            next_entry = undecided[0]
+            if not current_topic:
+                # First segment of a new topic: start buffering, no output yet.
+                with self.lock:
+                    self.report_summary_decided_index = next_entry.index
+                    self.report_summary_status = "蓄積中"
+                continue
+
+            if len(current_topic) >= MAX_TOPIC_BUFFER_SEGMENTS:
+                is_new_topic = True
+            else:
+                with self.lock:
+                    self.report_summary_status = "話題判定中"
+                is_new_topic = detect_topic_change(provider_id, current_topic, next_entry)
+
+            if not is_new_topic:
+                # Same topic: keep buffering, do not output a summary yet.
+                with self.lock:
+                    self.report_summary_decided_index = next_entry.index
+                    self.report_summary_status = "蓄積中"
+                    self.report_summary_error = ""
+                continue
+
+            # Topic changed: summarize the buffered topic and append it as items.
+            # next_entry stays undecided and becomes the start of the next topic.
+            self._commit_topic_summary(
+                provider_id,
+                current_topic,
+                previous_items,
+                section_id,
+                section_label,
+                "要約中",
+            )
 
     def on_recording_started(
         self,
@@ -1529,6 +1716,7 @@ class MeetingAppState:
             self.transcript_entries = []
             self.report_summary_items_by_section = {}
             self.report_summary_last_entry_index = 0
+            self.report_summary_decided_index = 0
             self.report_summary_status = "待機中"
             self.report_summary_error = ""
         self.add_log("recording started")
@@ -1569,7 +1757,11 @@ class MeetingAppState:
             self.elapsed_seconds = duration
             self.recording_started_at = None
             self.controller = None
+            should_flush = self.auto_summarize
         self.add_log("recording stopped")
+        if should_flush:
+            # Summarize the buffered final topic that has no following topic change.
+            self.request_auto_summary(flush=True)
 
     def start_recording(
         self,
@@ -1578,6 +1770,7 @@ class MeetingAppState:
         transcriber_mode: str,
         auto_reflect: bool,
         auto_summarize: bool,
+        clean_transcripts: bool,
         language: str | None,
     ) -> None:
         with self.lock:
@@ -1585,6 +1778,7 @@ class MeetingAppState:
                 raise RuntimeError("Recording is already active.")
             self.auto_reflect = auto_reflect
             self.auto_summarize = auto_summarize
+            self.clean_transcripts = clean_transcripts
         api_provider = api_provider_from_transcriber_mode(transcriber_mode)
         if api_provider:
             self.set_llm_provider(api_provider)
@@ -1598,7 +1792,7 @@ class MeetingAppState:
             status_seconds=2.0,
             warn_rms=120.0,
             transcriber_mode=transcriber_mode,
-            local_model="tiny",
+            local_model=local_whisper_settings()["model"],
             api_model="gpt-4o-mini-transcribe",
             language=language,
             prompt="会議の文字起こし。固有名詞を丁寧に扱う。",
@@ -1686,6 +1880,7 @@ class MeetingAppState:
                 (entry.index for entry in entries),
                 default=self.report_summary_last_entry_index,
             )
+            self.report_summary_decided_index = self.report_summary_last_entry_index
             self.report_summary_status = "待機中"
             self.report_summary_error = ""
             version = self.document_version
@@ -1717,6 +1912,14 @@ class MeetingAppState:
             summary_status = self.report_summary_status
             summary_error = self.report_summary_error
             last_summarized_segment = self.report_summary_last_entry_index
+            buffered_segment_count = len(
+                [
+                    entry
+                    for entry in self.transcript_entries
+                    if entry.index > self.report_summary_last_entry_index
+                    and should_summarize_transcript(entry.text)
+                ]
+            )
 
         transcript_text = transcript_entries_to_text(entries)
         return {
@@ -1728,6 +1931,7 @@ class MeetingAppState:
             "summary_status": summary_status,
             "summary_error": summary_error,
             "last_summarized_segment": last_summarized_segment,
+            "buffered_segment_count": buffered_segment_count,
             **target,
         }
 
@@ -1801,6 +2005,7 @@ class MeetingAppState:
                 "transcriber_mode": self.transcriber_mode,
                 "auto_reflect": self.auto_reflect,
                 "auto_summarize": self.auto_summarize,
+                "clean_transcripts": self.clean_transcripts,
                 "document_path": str(self.document_path.relative_to(ROOT_DIR)),
                 "document_version": self.document_version,
                 "transcript_entries": [
@@ -1836,6 +2041,7 @@ class StartRequest(BaseModel):
     transcriber: str = "local"
     auto_reflect: bool = True
     auto_summarize: bool = True
+    clean_transcripts: bool = True
     language: str | None = "ja"
 
 
@@ -1849,6 +2055,10 @@ class AutoReflectRequest(BaseModel):
 
 
 class AutoSummaryRequest(BaseModel):
+    enabled: bool
+
+
+class CleanTranscriptsRequest(BaseModel):
     enabled: bool
 
 
@@ -1911,6 +2121,7 @@ def start_recording(request: StartRequest) -> dict[str, Any]:
             transcriber_mode=request.transcriber,
             auto_reflect=request.auto_reflect,
             auto_summarize=request.auto_summarize,
+            clean_transcripts=request.clean_transcripts,
             language=request.language,
         )
     except Exception as exc:
@@ -1933,6 +2144,12 @@ def set_auto_reflect(request: AutoReflectRequest) -> dict[str, Any]:
 @app.post("/api/auto-summary")
 def set_auto_summary(request: AutoSummaryRequest) -> dict[str, Any]:
     manager.set_auto_summarize(request.enabled)
+    return {"ok": True}
+
+
+@app.post("/api/clean-transcripts")
+def set_clean_transcripts(request: CleanTranscriptsRequest) -> dict[str, Any]:
+    manager.set_clean_transcripts(request.enabled)
     return {"ok": True}
 
 
